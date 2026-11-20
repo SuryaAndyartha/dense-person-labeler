@@ -21,6 +21,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import sys
 import time
 from collections import OrderedDict
@@ -72,6 +73,14 @@ KP_COL = {"L": "#3fd0e0", "R": "#ff9a3c", "C": "#f2f2f2"}
 # colours of OTHER objects' labels (shown thin and read-only), one per label name
 OTHER_COLORS = ["#ff6b6b", "#4ecdc4", "#ffd93d", "#f78fb3", "#9be15d", "#00b4d8", "#ff9f43", "#c56cf0"]
 KP_SHOW = 0.3          # a keypoint is shown if its score >= this
+
+
+def backup_to_trash(path, trash_dir):
+    """Copy a file into the dataset's .trash folder with a timestamp, so it can be restored."""
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    dst = trash_dir / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}"
+    shutil.copy2(path, dst)
+    return dst
 
 
 def iou_many(b, B):
@@ -146,15 +155,25 @@ class VideoData:
                 continue
             self.others.setdefault(int(f), []).append((lab, box))
         self.other_labels = sorted({lab for lab, _ in self.extra if lab != self.label})
-        for i, box in self.anchors.items():
-            if i not in self.labels:
-                self.labels[i] = dict(status="visible", box=box, source="initial")
+        self._add_anchor_labels()
         self.cache, self.pos = OrderedDict(), 0   # pos = frame that cap.read() reads next
         self.dirty = False
 
     def nearest(self, f):
         a = np.asarray(self.frames)
         return int(np.argmin(np.abs(a - f)))
+
+    def _add_anchor_labels(self):
+        for i, box in self.anchors.items():
+            if i not in self.labels:
+                self.labels[i] = dict(status="visible", box=box, source="initial")
+
+    def clear_label(self):
+        """Remove every label of the current object in this video (other objects' labels are kept)."""
+        self.labels = {}
+        self.extra = {k: v for k, v in self.extra.items() if k[0] != self.label}
+        self._add_anchor_labels()
+        self.dirty = True
 
     def _load_csv(self):
         if not self.out_csv.exists():
@@ -398,6 +417,8 @@ class App:
         bf = ttk.Frame(p); bf.grid(row=14, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(bf, text="Save (S)", command=self.save).pack(side="left", expand=True, fill="x")
         ttk.Button(bf, text="Unlabelled (G)", command=self.goto_unlabeled).pack(side="left", expand=True, fill="x", padx=(4, 0))
+        ttk.Button(p, text=f"Clear all '{self.name}' labels in this video…",
+                   command=self.clear_video_label).grid(row=15, column=0, sticky="ew", pady=(0, 8))
 
         self.canvas.bind("<Configure>", lambda e: self.render())
         self.canvas.bind("<ButtonPress-1>", self._press)
@@ -860,6 +881,27 @@ class App:
             self.say(f"Saved: {self.data.out_csv}")
             k = list(self.videos).index(self.data.vid)
             self.combo.configure(values=self._video_values()); self.combo.current(k)
+
+    def clear_video_label(self):
+        d = self.data
+        if d is None:
+            return
+        self.stop()
+        trash = self.out.parent / ".trash"
+        others = f"\nLabels of other objects ({', '.join(d.other_labels)}) are kept." if d.other_labels else ""
+        if not messagebox.askyesno("Clear labels",
+                                   f"Delete all '{self.name}' labels in {d.vid}?{others}\n\n"
+                                   f"A backup of the current CSV is copied to:\n{trash}"):
+            self.canvas.focus_set(); return
+        backup = backup_to_trash(d.out_csv, trash) if d.out_csv.exists() else None
+        d.clear_label()
+        d.save()
+        self.undo.clear()
+        self.i = self._first_unlabeled(0)
+        k = list(self.videos).index(d.vid)
+        self.combo.configure(values=self._video_values()); self.combo.current(k)
+        self.draw_timeline(full=True); self.render(); self.canvas.focus_set()
+        self.say(f"All '{self.name}' labels in {d.vid} were cleared." + (f" Backup: {backup}" if backup else ""))
 
     def _autosave(self):
         if self.data is not None and self.data.dirty and not self.playing:

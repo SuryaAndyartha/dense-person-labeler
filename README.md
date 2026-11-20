@@ -65,6 +65,7 @@ The launcher window opens:
 1. **Choose a dataset.** The list shows every folder inside `datasets/`.
    - *New dataset…* creates `datasets/<name>/videos/` and opens it. Put your videos there, then click *Reload*.
    - *Other folder…* picks a folder outside the repository that contains `videos/` or contains the videos directly.
+   - *Manage files…* lists the dataset's videos with their npz and labelled objects, and deletes npz or label files of selected videos (section 7).
 2. **Choose the frame step** (*Label every N frames*, see section 3). Default: 2.
    **Name the object** (*Object label*, see section 4). Default: `target`.
 3. **Choose a labelling mode.** Modes that are not possible are disabled automatically.
@@ -159,14 +160,23 @@ The *Progress* box shows the device actually used (e.g. `CPUExecutionProvider`).
 
 ### Other notes
 
-- Only videos **without** a matching npz are processed.
+- Only videos **without** a matching npz are processed. To redo videos that already have a matching npz (e.g. with another model or with the skeleton), tick **Recreate existing npz too (overwrite)**; all videos are then processed again after a confirmation. To redo only some videos, delete their npz in *Manage files…* first.
 - On **first use** the models are downloaded automatically (needs internet access to `download.openmmlab.com` or `huggingface.co`) and cached in `~/.cache/rtmlib`.
 - **Can be stopped** with *Stop YOLOX*. Finished videos are kept; click *Start* again to continue.
 - If *Use existing npz* is chosen while some videos have no matching npz, those videos are labelled manually.
 
 ---
 
-## 7. Folder structure
+## 7. Deleting labels and npz
+
+Nothing is deleted permanently: files are moved (or, for a cleared label, the CSV is first copied) to the dataset's trash folder `datasets/<name>/.trash/`, with a timestamp in the name. To restore a file, move it back and remove the timestamp from its name.
+
+- **In the labeller:** *Clear all '<label>' labels in this video…* removes every label of the current object in the open video. Labels of other objects in the same CSV are kept; a backup of the CSV is copied to the trash first.
+- **In the launcher:** *Manage files…* → select videos → *Delete npz* or *Delete labels*. *Delete labels* moves the whole CSV of those videos (all objects).
+
+---
+
+## 8. Folder structure
 
 ```
 dense-person-labeler/
@@ -190,7 +200,8 @@ datasets/<dataset_name>/
 ├── videos/              REQUIRED, you fill it: videos (.mp4/.avi/.mov/.mkv)
 ├── npz/                 created by "Create npz", or copied by you (same name as the video)
 ├── initial_labels.csv   OPTIONAL: initial labels (video_id, frame_idx, x1, y1, x2, y2)
-└── labels/              created automatically: results, one CSV per video
+├── labels/              created automatically: results, one CSV per video
+└── .trash/              created when something is deleted: deleted / backed-up files
 ```
 
 Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1,x2,y2,source,label`, grouped by label, then frame (so `frame_idx` restarts for each label). For analysis, filter by `label` or sort by `label, frame_idx`.
@@ -198,12 +209,12 @@ Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1
 - `source`: `click` (clicked detection box), `drawn` (drawn box), `auto` (following detection boxes), `follow_drawn` (copy of your drawn box), `initial` (initial label).
 - `label`: the object label (section 4).
 
-## 8. Without the launcher window
+## 9. Without the launcher window
 
 ```bash
 python start.py --dataset datasets/example_dataset --mode npz      [--step 2] [--label-name patient]
 python start.py --dataset datasets/example_dataset --mode manual   [--step 2]
-python start.py --dataset datasets/example_dataset --mode yolox    [--step 2] [--no-pose] [--device auto|cpu|mps|cuda]
+python start.py --dataset datasets/example_dataset --mode yolox    [--step 2] [--no-pose] [--redo] [--device auto|cpu|mps|cuda]
 
 python labeler/make_npz.py --videos datasets/example_dataset/videos --out datasets/example_dataset/npz --stride 2
 python labeler/dense_labeler.py --videos datasets/example_dataset/videos --npz datasets/example_dataset/npz --out datasets/example_dataset/labels --step 2 --label-name patient
@@ -212,7 +223,7 @@ python labeler/dense_labeler.py --out datasets/example_dataset/labels --merge   
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Message | Cause | Fix |
 |---|---|---|
@@ -226,7 +237,7 @@ python labeler/dense_labeler.py --out datasets/example_dataset/labels --merge   
 
 ---
 
-## 10. npz format
+## 11. npz format
 
 One file per video, with the same name as the video:
 
@@ -244,7 +255,7 @@ Frames are read sequentially (`grab/retrieve`), so frame numbers match the label
 
 ---
 
-## 11. Testing (for developers)
+## 12. Testing (for developers)
 
 1. **Existing npz:** a dataset with videos + their npz (+ optional `initial_labels.csv`). Expected: detection boxes and yellow initial labels appear; Space follows the boxes.
 2. **100% manual:** a dataset with videos only. Expected: no detection boxes; a drawn box is copied (purple) on Space.
@@ -252,4 +263,6 @@ Frames are read sequentially (`grab/retrieve`), so frame numbers match the label
 4. **Stop and resume:** with 2 videos, stop during the second, then *Start* again. Expected: the first video is skipped.
 5. **Object labels:** label a video as `patient`, then again as `examiner`. Expected: one CSV with both labels; in the second session the `patient` boxes appear as thin dashed boxes.
 6. **Frame step:** with an npz made at N = 2, choose N = 4 (npz still used) and N = 1 or 3 (labelled manually, or recreated by *Create npz*).
-7. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.
+7. **Recreate npz:** with all videos having a matching npz, tick *Recreate existing npz too*. Expected: the YOLOX mode becomes available, a confirmation lists the npz to overwrite, then all are recreated.
+8. **Delete:** *Manage files…* → delete the npz of one video (it then counts as "without npz") and the labels of another; *Clear all … labels* in the labeller. Expected: files appear in `.trash/`, other objects' labels are kept.
+9. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.

@@ -26,9 +26,11 @@ import csv
 import importlib.util
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 if sys.version_info < (3, 8):
@@ -116,6 +118,7 @@ class Dataset:
         self.npz_dir = self.root / "npz"
         self.out_dir = self.root / "labels"
         self.initial_labels = self.root / "initial_labels.csv"
+        self.trash_dir = self.root / ".trash"     # deleted npz / label files are moved here
         self.refresh()
 
     @property
@@ -123,7 +126,7 @@ class Dataset:
         return self.root.name
 
     def refresh(self):
-        skip = {self.npz_dir, self.out_dir}
+        skip = {self.npz_dir, self.out_dir, self.trash_dir}
         vids = {}
         if self.videos_dir.is_dir():
             for p in sorted(self.videos_dir.rglob("*")):
@@ -163,6 +166,25 @@ class Dataset:
                 f"Densest: every 1 frame (= video fps).")
 
 
+def labels_in_csv(path):
+    """Object labels present in a labels CSV (rows without a label count as the default label)."""
+    if not path.exists():
+        return []
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            return sorted({(r.get("label") or "").strip() or DEFAULT_LABEL for r in csv.DictReader(fh)})
+    except Exception:
+        return ["(unreadable)"]
+
+
+def move_to_trash(path, trash_dir):
+    """Move a file into the dataset's .trash folder with a timestamp, so it can be restored."""
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    dst = trash_dir / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}"
+    shutil.move(str(path), str(dst))
+    return dst
+
+
 def list_datasets(step=2):
     if not DATASET_DIR.is_dir():
         return []
@@ -199,10 +221,10 @@ def labeler_cmd(ds, mode, initial_labels=None, label=DEFAULT_LABEL):
     return cmd
 
 
-def yolox_cmd(ds, model="balanced", device="auto", no_pose=False):
+def yolox_cmd(ds, model="balanced", device="auto", no_pose=False, redo=False):
     cmd = [sys.executable, "-u", str(TOOLS_DIR / "make_npz.py"), "--videos", str(ds.videos_dir),
            "--out", str(ds.npz_dir), "--model", model, "--device", device, "--stride", str(ds.step)]
-    return cmd + (["--no-pose"] if no_pose else [])
+    return cmd + (["--no-pose"] if no_pose else []) + (["--redo"] if redo else [])
 
 
 def open_folder(path):
@@ -233,8 +255,8 @@ def run_cli(args):
         sys.exit("Packages not installed: " + ", ".join(miss) + "\nRun: " + pip_hint(miss))
     if args.mode == "npz" and not ds.with_npz:
         sys.exit("This dataset has no npz yet. Use --mode yolox or --mode manual.")
-    if args.mode == "yolox" and ds.without_npz:
-        r = subprocess.run(yolox_cmd(ds, args.model, args.device, args.no_pose))
+    if args.mode == "yolox" and (ds.without_npz or args.redo):
+        r = subprocess.run(yolox_cmd(ds, args.model, args.device, args.no_pose, args.redo))
         if r.returncode != 0:
             sys.exit("Creating npz did not finish. Run again to continue.")
     init = Path(args.initial_labels) if args.initial_labels else (ds.initial_labels if ds.initial_labels.exists() else None)
@@ -268,7 +290,7 @@ def run_gui():
         def _build(self):
             r = self.root
             r.title("Dense person labeler · choose dataset")
-            r.geometry("820x830")
+            r.geometry("820x860")
             r.minsize(720, 640)
             r.columnconfigure(0, weight=1)
             r.rowconfigure(3, weight=1)
@@ -287,6 +309,7 @@ def run_gui():
             ttk.Button(b1, text="Other folder…", command=self.pick_other).pack(side="left", padx=6)
             ttk.Button(b1, text="Open folder", command=lambda: self.ds and open_folder(self.ds.root)).pack(side="left")
             ttk.Button(b1, text="Reload", command=self.reload).pack(side="left", padx=6)
+            ttk.Button(b1, text="Manage files…", command=self.manage_files).pack(side="left")
             self.lbl_ds = ttk.Label(f1, text="", wraplength=780, justify="left")
             self.lbl_ds.grid(row=3, column=0, sticky="w", pady=(8, 0))
             srow = ttk.Frame(f1); srow.grid(row=4, column=0, sticky="w", pady=(8, 0))
@@ -333,8 +356,12 @@ def run_gui():
             self.var_pose = tk.BooleanVar(value=True)
             self.ck_pose = ttk.Checkbutton(opt, text="Include skeleton (RTMPose)", variable=self.var_pose)
             self.ck_pose.pack(side="left")
+            self.var_redo = tk.BooleanVar(value=False)
+            self.ck_redo = ttk.Checkbutton(f2, text="Recreate existing npz too (overwrite)", variable=self.var_redo,
+                                           command=self._update)
+            self.ck_redo.grid(row=6, column=0, sticky="w", padx=(24, 0), pady=(2, 0))
             self.lbl_mode = ttk.Label(f2, text="", wraplength=780, justify="left", foreground="#555")
-            self.lbl_mode.grid(row=5, column=0, sticky="w", pady=(6, 0))
+            self.lbl_mode.grid(row=7, column=0, sticky="w", pady=(6, 0))
 
             # 3. initial labels (optional)
             f3 = ttk.Frame(r, padding=(12, 8, 12, 4)); f3.grid(row=2, column=0, sticky="nsew")
@@ -457,16 +484,22 @@ def run_gui():
             nn = len(ds.with_npz) if ds else 0
             nw = len(ds.without_npz) if ds else 0
             nb = len(ds.bad_npz) if ds else 0
+            redo = self.var_redo.get() and nv > 0
             self.rb_npz.configure(text=f"Use existing npz: click a YOLOX box + automatic following ({nn}/{nv} videos have a matching npz)",
                                   state="normal" if nn else "disabled")
-            self.rb_yolo.configure(text=(f"Create npz with YOLOX first for {nw} videos"
-                                         + (f" ({nb} of them recreated because their frame step does not match)" if nb else "")
-                                         + ", then label"
-                                         if nw else "Create npz with YOLOX first (all videos already have a matching npz)"),
-                                   state="normal" if nw else "disabled")
+            if redo:
+                yolo_txt = f"Create npz with YOLOX first for all {nv} videos (existing npz are overwritten), then label"
+            elif nw:
+                yolo_txt = (f"Create npz with YOLOX first for {nw} videos"
+                            + (f" ({nb} of them recreated because their frame step does not match)" if nb else "")
+                            + ", then label")
+            else:
+                yolo_txt = "Create npz with YOLOX first (all videos already have a matching npz; tick 'Recreate' to redo them)"
+            self.rb_yolo.configure(text=yolo_txt, state="normal" if (nw or redo) else "disabled")
+            self.ck_redo.configure(state="normal" if nv else "disabled")
             if self.mode.get() == "npz" and not nn:
                 self.mode.set("yolox" if nw else "manual")
-            if self.mode.get() == "yolox" and not nw:
+            if self.mode.get() == "yolox" and not nw and not redo:
                 self.mode.set("npz" if nn else "manual")
             m = self.mode.get()
             yolo_state = "readonly" if m == "yolox" else "disabled"
@@ -515,7 +548,8 @@ def run_gui():
                 return
             ds.refresh()
             m = self.mode.get()
-            miss = missing_packages(NEED_LABELER) + (missing_packages(NEED_YOLOX) if m == "yolox" and ds.without_npz else [])
+            redo = self.var_redo.get()
+            miss = missing_packages(NEED_LABELER) + (missing_packages(NEED_YOLOX) if m == "yolox" and (ds.without_npz or redo) else [])
             if miss:
                 messagebox.showerror("Packages not installed",
                                      "Packages not installed: " + ", ".join(miss) + "\n\nRun in a terminal:\n" + pip_hint(miss))
@@ -523,19 +557,19 @@ def run_gui():
             init = self._initial_labels()
             if init is False:
                 return
-            if m == "yolox" and ds.without_npz:
-                if ds.bad_npz and not messagebox.askyesno(
+            if m == "yolox" and (ds.without_npz or redo):
+                over = (ds.with_npz + ds.bad_npz) if redo else ds.bad_npz
+                if over and not messagebox.askyesno(
                         "Recreate npz",
-                        f"{len(ds.bad_npz)} npz were made with a frame step that does not match labelling every {ds.step} frames "
-                        f"and will be OVERWRITTEN (recreated every {ds.step} frames):\n{', '.join(ds.bad_npz[:10])}"
-                        + (" …" if len(ds.bad_npz) > 10 else "") + "\n\nContinue?"):
+                        f"{len(over)} existing npz will be OVERWRITTEN (recreated every {ds.step} frames):\n"
+                        f"{', '.join(over[:10])}" + (" …" if len(over) > 10 else "") + "\n\nContinue?"):
                     return
-                self.run_yolox(ds)
+                self.run_yolox(ds, redo)
             else:
                 self.run_labeler(ds, "manual" if m == "manual" else "npz", init)
 
-        def run_yolox(self, ds):
-            cmd = yolox_cmd(ds, self.var_model.get(), self.var_dev.get(), not self.var_pose.get())
+        def run_yolox(self, ds, redo=False):
+            cmd = yolox_cmd(ds, self.var_model.get(), self.var_dev.get(), not self.var_pose.get(), redo)
             self.write("$ " + " ".join(f'"{x}"' if " " in x else x for x in cmd))
             try:
                 self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -575,6 +609,8 @@ def run_gui():
             self.proc = None
             self.btn_stop.configure(state="disabled")
             self.lbl_prog.configure(text="")
+            if rc == 0:
+                self.var_redo.set(False)                         # do not overwrite again by accident
             ds = self.ds
             ds.refresh()
             self.set_dataset(ds)
@@ -610,6 +646,67 @@ def run_gui():
             self.write(f"Labeller closed (code {rc}). Results in: {self.ds.out_dir}")
             self.set_dataset(self.ds)
 
+        # ---------------- manage files (delete npz / labels, moved to .trash)
+        def manage_files(self):
+            ds = self.ds
+            if ds is None or not ds.videos:
+                messagebox.showinfo("Manage files", "Choose a dataset with videos first."); return
+            win = tk.Toplevel(self.root)
+            win.title(f"Manage files · {ds.name}")
+            win.geometry("680x440")
+            win.transient(self.root)
+            win.grab_set()
+            win.columnconfigure(0, weight=1); win.rowconfigure(1, weight=1)
+            ttk.Label(win, wraplength=640, justify="left",
+                      text="Select one or more videos (Shift/Ctrl/Cmd for several). Deleted files are moved to the "
+                           f"dataset's trash folder, so they can be restored:\n{ds.trash_dir}").grid(
+                row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
+            tv = ttk.Treeview(win, columns=("npz", "labels"), selectmode="extended")
+            tv.heading("#0", text="Video"); tv.heading("npz", text="npz"); tv.heading("labels", text="Labelled objects")
+            tv.column("#0", width=200); tv.column("npz", width=130); tv.column("labels", width=300)
+            tv.grid(row=1, column=0, sticky="nsew", padx=(10, 0))
+            sb = ttk.Scrollbar(win, command=tv.yview); sb.grid(row=1, column=1, sticky="ns", padx=(0, 10))
+            tv.configure(yscrollcommand=sb.set)
+
+            def fill():
+                tv.delete(*tv.get_children())
+                ds.refresh()
+                for v in ds.videos:
+                    z = ds.npz_dir / f"{v}.npz"
+                    st = npz_step(z) if z.exists() else None
+                    ztxt = (f"every {st} frames" if st else "yes") if z.exists() else "—"
+                    labs = labels_in_csv(ds.out_dir / f"{v}.csv")
+                    tv.insert("", "end", iid=v, text=v, values=(ztxt, ", ".join(labs) if labs else "—"))
+
+            def delete(kind):
+                vids = list(tv.selection())
+                if not vids:
+                    messagebox.showinfo("Manage files", "Select at least one video first.", parent=win); return
+                if kind == "npz":
+                    paths, what = [ds.npz_dir / f"{v}.npz" for v in vids], "npz file(s)"
+                else:
+                    paths, what = [ds.out_dir / f"{v}.csv" for v in vids], "label file(s) (all objects)"
+                paths = [x for x in paths if x.exists()]
+                if not paths:
+                    messagebox.showinfo("Manage files", f"The selected videos have no {what.split(' (')[0]}.", parent=win); return
+                if not messagebox.askyesno("Delete", f"Move {len(paths)} {what} to the trash?\n\n"
+                                           + ", ".join(x.stem for x in paths[:10]) + (" …" if len(paths) > 10 else ""),
+                                           parent=win):
+                    return
+                for x in paths:
+                    move_to_trash(x, ds.trash_dir)
+                self.write(f"Moved {len(paths)} {what} to {ds.trash_dir}")
+                fill()
+                self.set_dataset(ds)
+
+            bb = ttk.Frame(win); bb.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+            ttk.Button(bb, text="Delete npz", command=lambda: delete("npz")).pack(side="left")
+            ttk.Button(bb, text="Delete labels", command=lambda: delete("labels")).pack(side="left", padx=6)
+            ttk.Button(bb, text="Open trash folder",
+                       command=lambda: ds.trash_dir.is_dir() and open_folder(ds.trash_dir)).pack(side="left")
+            ttk.Button(bb, text="Close", command=win.destroy).pack(side="right")
+            fill()
+
         def quit(self):
             if self.proc is not None and self.proc.poll() is None:
                 if not messagebox.askyesno("Quit", "YOLOX is still running. Stop it and quit?"):
@@ -637,6 +734,7 @@ def main():
     ap.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto",
                     help="for --mode yolox (default auto: cuda if available, otherwise cpu)")
     ap.add_argument("--no-pose", action="store_true", help="for --mode yolox: skip RTMPose (faster)")
+    ap.add_argument("--redo", action="store_true", help="for --mode yolox: recreate existing npz too (overwrite)")
     ap.add_argument("--initial-labels", help="initial-labels CSV (default <dataset>/initial_labels.csv if present)")
     ap.add_argument("--step", type=int, default=2, help="label every N frames (default 2; 1 = every frame)")
     ap.add_argument("--label-name", default=DEFAULT_LABEL,
