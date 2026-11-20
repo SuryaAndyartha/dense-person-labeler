@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-make_npz.py - membuat file npz panduan untuk alat label (YOLOX + RTMPose, dijalankan di komputer sendiri).
+make_npz.py - create guidance npz files for the labeller (YOLOX + RTMPose, run on your own computer).
 
-Untuk setiap video: baca setiap frame ke-2, deteksi orang dengan YOLOX, (opsional) cari 26 titik tubuh dengan
-RTMPose, lalu simpan <nama_video>.npz dengan format yang SAMA dengan Stage 2 proyek FreezingOfGait-SelfAnalysis
+For every video: read every N-th frame (default 2), detect people with YOLOX, (optionally) find 26 body keypoints
+with RTMPose, then save <video_name>.npz in the SAME format as Stage 2 of the FreezingOfGait-SelfAnalysis project
 (notebook/2_detector_pose.ipynb):
     det_frame (K,)  det_boxes (K,4)  det_scores (K,)  det_kpts (K,26,2)  det_kpt_scores (K,26)
     frames_processed (T,)  meta (JSON)
-Fungsi deteksi (decode_yolox, nms, clean_dets) dan cara membaca frame (FrameReader) disalin dari Stage 2.
+The detection functions (decode_yolox, nms, clean_dets) and frame reading (FrameReader) are copied from Stage 2.
 
-Video yang sudah punya npz dilewati, jadi aman dihentikan lalu dijalankan lagi.
+Videos that already have a matching npz are skipped, so it is safe to stop and run again.
 
-Contoh (dari folder repo):
+Examples (from the repository folder):
   python3 labeler/make_npz.py --videos datasets/example_dataset/videos --out datasets/example_dataset/npz
-  python3 labeler/make_npz.py --videos ... --out ... --tanpa-pose          # lebih cepat, tanpa kerangka
+  python3 labeler/make_npz.py --videos ... --out ... --no-pose             # faster, no skeleton
 """
 import argparse
 import json
@@ -30,7 +30,7 @@ try:
     import cv2
     import numpy as np
 except ImportError:
-    sys.exit("Paket kurang. Jalankan: pip install opencv-python numpy")
+    sys.exit("Missing packages. Run: pip install opencv-python numpy")
 
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".MP4", ".AVI", ".MOV", ".MKV")
 N_KPTS = 26
@@ -44,7 +44,7 @@ def say(msg):
     print(msg, flush=True)
 
 
-# ----------------------------------------------------------------------------- deteksi (disalin dari Stage 2)
+# ----------------------------------------------------------------------------- detection (copied from Stage 2)
 def nms(boxes, scores, thr):
     if len(boxes) == 0:
         return np.zeros(0, int)
@@ -105,9 +105,9 @@ def clean_dets(boxes, scores, w, h, max_dets, min_size=4):
 
 
 def use_certifi():
-    """Python dari python.org di macOS sering belum punya sertifikat SSL, sehingga unduhan model gagal
-    (CERTIFICATE_VERIFY_FAILED). Dipanggil HANYA setelah unduhan gagal: pakai sertifikat paket certifi.
-    Mengembalikan True jika pengaturan berubah (layak dicoba lagi)."""
+    """Python from python.org on macOS often has no SSL certificates yet, so model downloads fail
+    (CERTIFICATE_VERIFY_FAILED). Called ONLY after a download failed: use the certificates from the certifi package.
+    Returns True if the setting changed (worth retrying)."""
     if os.environ.get("SSL_CERT_FILE"):
         return False
     try:
@@ -119,7 +119,7 @@ def use_certifi():
 
 
 def available_devices():
-    """Perangkat yang benar-benar tersedia di onnxruntime komputer ini. cpu selalu ada."""
+    """Devices actually available to onnxruntime on this computer. cpu is always there."""
     try:
         import onnxruntime as ort
         prov = ort.get_available_providers()
@@ -137,14 +137,14 @@ def active_providers(model):
     try:
         return model.session.get_providers()
     except Exception:
-        return ["(tidak diketahui)"]
+        return ["(unknown)"]
 
 
-def build_models(mode, device, det_thr, nms_thr, with_pose):
+def build_models(model, device, det_thr, nms_thr, with_pose):
     try:
         from rtmlib import YOLOX, RTMPose, BodyWithFeet
     except ImportError:
-        sys.exit("rtmlib belum terpasang. Jalankan: pip install rtmlib onnxruntime")
+        sys.exit("rtmlib is not installed. Run: pip install rtmlib onnxruntime")
 
     class YOLOXWithScores(YOLOX):
         """rtmlib's YOLOX drops the scores and uses a fixed 0.3 threshold; ByteTrack needs both."""
@@ -152,7 +152,7 @@ def build_models(mode, device, det_thr, nms_thr, with_pose):
             img, ratio = self.preprocess(image)
             return decode_yolox(self.inference(img), ratio, self.model_input_size, self.score_thr, self.nms_thr)
 
-    cfg = BodyWithFeet.MODE[mode]
+    cfg = BodyWithFeet.MODE[model]
     det = YOLOXWithScores(cfg["det"], model_input_size=cfg["det_input_size"], nms_thr=nms_thr,
                           score_thr=det_thr, backend="onnxruntime", device=device)
     pose = None
@@ -162,7 +162,7 @@ def build_models(mode, device, det_thr, nms_thr, with_pose):
     return det, pose, cfg
 
 
-# ----------------------------------------------------------------------------- video (disalin dari Stage 2)
+# ----------------------------------------------------------------------------- video (copied from Stage 2)
 def probe_video(path):
     """(fps, n_frames): ffprobe first, OpenCV as fallback (same rule as the Stage 1 labelling tool)."""
     fps = nb = None
@@ -235,7 +235,7 @@ def fmt_sec(s):
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
 
 
-# ----------------------------------------------------------------------------- satu video
+# ----------------------------------------------------------------------------- one video
 def process_video(path, out_dir, det, pose, cfg, args, k, n_vid):
     fps, nb = probe_video(path)
     total = (nb + args.stride - 1) // args.stride if nb else 0
@@ -254,11 +254,11 @@ def process_video(path, out_dir, det, pose, cfg, args, k, n_vid):
             ks = np.zeros((n, N_KPTS), np.float32)
             need = scores >= args.pose_min_score
             if pose is not None and need.any():
-                # rtmlib: tanpa kotak ia memproses seluruh gambar, jadi hanya dipanggil jika ada kotak
+                # rtmlib processes the whole image when given no boxes, so only call it when there are boxes
                 k_, s_ = pose(frame, [b.tolist() for b in boxes[need]])
                 k_, s_ = np.asarray(k_, np.float32), np.asarray(s_, np.float32)
                 if k_.shape[1:] != (N_KPTS, 2):
-                    raise RuntimeError(f"model pose memberi bentuk {k_.shape}, seharusnya (N, 26, 2) Halpe-26")
+                    raise RuntimeError(f"pose model returned shape {k_.shape}, expected (N, 26, 2) Halpe-26")
                 kp[need], ks[need] = k_, s_
             done.append(i)
             if n:
@@ -270,20 +270,20 @@ def process_video(path, out_dir, det, pose, cfg, args, k, n_vid):
                 m = len(done)
                 rate = m / max(now - t0, 1e-6)
                 if total:
-                    say(f"[PROGRES] video {k}/{n_vid} {path.stem}: {m}/{total} langkah "
-                        f"({100 * m / total:.0f}%), {rate:.1f} langkah/s, sisa ~{fmt_sec((total - m) / max(rate, 1e-6))}")
+                    say(f"[PROGRESS] video {k}/{n_vid} {path.stem}: {m}/{total} steps "
+                        f"({100 * m / total:.0f}%), {rate:.1f} steps/s, ~{fmt_sec((total - m) / max(rate, 1e-6))} left")
                 else:
-                    say(f"[PROGRES] video {k}/{n_vid} {path.stem}: {m} langkah, {rate:.1f} langkah/s")
+                    say(f"[PROGRESS] video {k}/{n_vid} {path.stem}: {m} steps, {rate:.1f} steps/s")
     finally:
         reader.stop.set()
-        while reader.is_alive():                 # lepaskan pembaca yang menunggu antrean penuh
+        while reader.is_alive():                 # release a reader waiting on a full queue
             try:
                 reader.q.get_nowait()
             except queue.Empty:
                 pass
             reader.join(0.05)
     if not done:
-        raise IOError("tidak ada frame yang bisa dibaca")
+        raise IOError("no frames could be read")
     secs = time.time() - t0
     cat = lambda lst, shape, dt: np.concatenate(lst).astype(dt) if lst else np.zeros(shape, dt)
     meta = dict(video=path.name, video_id=path.stem, source_path=str(path), fps=fps,
@@ -291,7 +291,7 @@ def process_video(path, out_dir, det, pose, cfg, args, k, n_vid):
                 keypoint_format="halpe26", keypoint_names=HALPE26_NAMES,
                 det_model=cfg["det"], pose_model=cfg["pose"] if pose is not None else None,
                 with_pose=pose is not None, pose_min_score=args.pose_min_score,
-                mode=args.mode, device=args.device, stride=args.stride,
+                model=args.model, device=args.device, stride=args.stride,
                 det_thr=args.det_thr, nms_thr=args.nms_thr, max_dets=args.max_dets,
                 seconds=round(secs, 1), n_frames_processed=len(done), n_dets=int(sum(len(x) for x in fr_l)),
                 created=datetime.now().isoformat(timespec="seconds"), tool="dense-person-labeler/labeler/make_npz.py")
@@ -312,41 +312,41 @@ def find_videos(folder, only=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Buat npz panduan (YOLOX + RTMPose) untuk alat label padat.")
-    ap.add_argument("--videos", required=True, help="folder video (dicari sampai subfolder)")
-    ap.add_argument("--out", required=True, help="folder tujuan npz")
-    ap.add_argument("--mode", default="balanced", choices=["lightweight", "balanced", "performance"],
-                    help="ukuran model rtmlib (default balanced = sama dengan Stage 2)")
+    ap = argparse.ArgumentParser(description="Create guidance npz files (YOLOX + RTMPose) for the dense labeller.")
+    ap.add_argument("--videos", required=True, help="video folder (searched recursively)")
+    ap.add_argument("--out", required=True, help="output folder for npz files")
+    ap.add_argument("--model", default="balanced", choices=["lightweight", "balanced", "performance"],
+                    help="rtmlib model size (default balanced)")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"],
-                    help="auto (cuda jika ada, selain itu cpu), cpu, mps (Mac, lewat CoreML), cuda (GPU NVIDIA)")
-    ap.add_argument("--stride", type=int, default=2, help="proses setiap frame ke-N (default 2, sama dengan label)")
-    ap.add_argument("--det-thr", type=float, default=0.10, help="ambang skor YOLOX (default 0.10, sama dengan Stage 2)")
+                    help="auto (cuda if available, otherwise cpu), cpu, mps (Mac, via CoreML), cuda (NVIDIA GPU)")
+    ap.add_argument("--stride", type=int, default=2, help="process every N-th frame (default 2, same as the labels)")
+    ap.add_argument("--det-thr", type=float, default=0.10, help="YOLOX score threshold (default 0.10)")
     ap.add_argument("--nms-thr", type=float, default=0.45)
-    ap.add_argument("--max-dets", type=int, default=30, help="maks. kotak per frame (default 30)")
-    ap.add_argument("--tanpa-pose", action="store_true", help="lewati RTMPose (lebih cepat, kerangka K tidak tersedia)")
+    ap.add_argument("--max-dets", type=int, default=30, help="max boxes per frame (default 30)")
+    ap.add_argument("--no-pose", action="store_true", help="skip RTMPose (faster; skeleton K not available)")
     ap.add_argument("--pose-min-score", type=float, default=0.3,
-                    help="RTMPose hanya untuk kotak dengan skor >= ini (default 0.3 = kotak yang tampil di alat label; "
-                         "0.1 = semua kotak seperti Stage 2, jauh lebih lama)")
-    ap.add_argument("--ulang", action="store_true", help="buat ulang walaupun npz sudah ada")
-    ap.add_argument("--only", help="hanya video yang namanya mengandung teks ini")
+                    help="RTMPose only for boxes with score >= this (default 0.3 = the boxes shown in the labeller; "
+                         "0.1 = all boxes, much slower)")
+    ap.add_argument("--redo", action="store_true", help="recreate even if an npz already exists")
+    ap.add_argument("--only", help="only videos whose name contains this text")
     args = ap.parse_args()
 
     videos = find_videos(args.videos, args.only)
     if not videos:
-        sys.exit(f"Tidak ada video di {args.videos}")
+        sys.exit(f"No videos in {args.videos}")
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    for t in out.glob("*.npz.tmp"):            # sisa proses yang dihentikan di tengah jalan
+    for t in out.glob("*.npz.tmp"):            # leftovers of a run stopped half-way
         try:
             t.unlink()
         except OSError:
             pass
     if args.stride < 1:
-        sys.exit("--stride minimal 1")
+        sys.exit("--stride must be at least 1")
 
     def usable(v):
-        """npz lama dipakai jika jarak framenya membagi --stride (npz setiap 2 frame cocok untuk 2, 4, 6, ...)."""
+        """An existing npz is reused if its frame spacing divides --stride (npz every 2 frames fits 2, 4, 6, ...)."""
         p = out / f"{v}.npz"
-        if args.ulang or not p.exists():
+        if args.redo or not p.exists():
             return False
         try:
             with np.load(p, allow_pickle=False) as d:
@@ -358,43 +358,43 @@ def main():
 
     todo = [(v, p) for v, p in videos.items() if not usable(v)]
     redo = [v for v, _ in todo if (out / f"{v}.npz").exists()]
-    say(f"{len(videos)} video, {len(videos) - len(todo)} sudah punya npz yang cocok, {len(todo)} akan diproses "
-        f"(setiap {args.stride} frame).")
-    if redo and not args.ulang:
-        say(f"{len(redo)} npz lama dibuat dengan jarak frame yang tidak cocok dan akan dibuat ulang: {', '.join(redo)}")
+    say(f"{len(videos)} videos, {len(videos) - len(todo)} already have a matching npz, {len(todo)} to process "
+        f"(every {args.stride} frames).")
+    if redo and not args.redo:
+        say(f"{len(redo)} existing npz were made with a non-matching frame step and will be recreated: {', '.join(redo)}")
     if not todo:
-        say("SELESAI: semua video sudah punya npz.")
+        say("DONE: all videos already have an npz.")
         return
     avail = available_devices()
     if args.device == "auto":
         args.device = "cuda" if "cuda" in avail else "cpu"
     elif args.device not in avail:
-        say(f"[PERINGATAN] perangkat {args.device} tidak tersedia di komputer ini (tersedia: {', '.join(avail)}). Memakai cpu.")
+        say(f"[WARNING] device {args.device} is not available on this computer (available: {', '.join(avail)}). Using cpu.")
         args.device = "cpu"
-    say(f"Memuat model YOLOX{' + RTMPose' if not args.tanpa_pose else ''} ({args.mode}, {args.device}). "
-        "Pertama kali: model diunduh dulu (perlu internet).")
+    say(f"Loading YOLOX{' + RTMPose' if not args.no_pose else ''} ({args.model}, {args.device}). "
+        "First time: the models are downloaded (needs internet).")
 
     def is_download_error(e):
         txt = f"{e.__class__.__name__}: {e}"
         return ("CERTIFICATE_VERIFY_FAILED" in txt or "urlopen error" in txt or "URLError" in txt), txt
 
     def load(device):
-        """Muat model. Jika unduhan gagal karena sertifikat, coba sekali lagi dengan sertifikat certifi."""
+        """Load the models. If the download fails because of certificates, retry once with certifi's certificates."""
         try:
-            return build_models(args.mode, device, args.det_thr, args.nms_thr, not args.tanpa_pose)
+            return build_models(args.model, device, args.det_thr, args.nms_thr, not args.no_pose)
         except SystemExit:
             raise
         except Exception as e:
             dl, txt = is_download_error(e)
             if dl and "CERTIFICATE_VERIFY_FAILED" in txt and use_certifi():
-                say("Sertifikat SSL bawaan Python gagal; mencoba lagi dengan sertifikat certifi.")
+                say("Python's default SSL certificates failed; retrying with certifi's certificates.")
                 return load(device)
             if dl:
-                say("[GAGAL] Model tidak bisa diunduh: " + txt)
-                say("Periksa internet (perlu akses ke download.openmmlab.com atau huggingface.co).\n"
-                    "Di macOS dengan Python dari python.org, jalankan sekali:\n"
+                say("[FAILED] The models could not be downloaded: " + txt)
+                say("Check your internet connection (needs access to download.openmmlab.com or huggingface.co).\n"
+                    "On macOS with Python from python.org, run once:\n"
                     '  open "/Applications/Python 3.12/Install Certificates.command"\n'
-                    "(sesuaikan versi Python), lalu coba lagi.")
+                    "(match your Python version), then try again.")
                 sys.exit(1)
             raise
 
@@ -405,28 +405,28 @@ def main():
     except Exception as e:
         if args.device == "cpu":
             raise
-        say(f"[PERINGATAN] perangkat {args.device} gagal ({e.__class__.__name__}: {e}). Memakai cpu.")
+        say(f"[WARNING] device {args.device} failed ({e.__class__.__name__}: {e}). Using cpu.")
         args.device = "cpu"
         det, pose, cfg = load("cpu")
-    say(f"Perangkat yang dipakai: YOLOX {active_providers(det)}"
+    say(f"Devices in use: YOLOX {active_providers(det)}"
         + (f", RTMPose {active_providers(pose)}" if pose is not None else ""))
 
-    t_all, gagal = time.time(), []
+    t_all, failed = time.time(), []
     try:
         for k, (vid, path) in enumerate(todo, 1):
             say(f"[VIDEO] {k}/{len(todo)} {vid}")
             try:
                 n, secs = process_video(path, out, det, pose, cfg, args, k, len(todo))
-                say(f"[OK] {vid}: {n} langkah dalam {fmt_sec(secs)} -> {out / (vid + '.npz')}")
+                say(f"[OK] {vid}: {n} steps in {fmt_sec(secs)} -> {out / (vid + '.npz')}")
             except Exception as e:
-                gagal.append(vid)
-                say(f"[GAGAL] {vid}: {e.__class__.__name__}: {e}")
+                failed.append(vid)
+                say(f"[FAILED] {vid}: {e.__class__.__name__}: {e}")
     except KeyboardInterrupt:
-        say("Dihentikan. Video yang sudah selesai tetap tersimpan; jalankan lagi untuk melanjutkan.")
+        say("Stopped. Finished videos are kept; run again to continue.")
         sys.exit(130)
-    say(f"SELESAI dalam {fmt_sec(time.time() - t_all)}. Berhasil {len(todo) - len(gagal)}, gagal {len(gagal)}"
-        + (f": {', '.join(gagal)}" if gagal else "."))
-    if gagal:
+    say(f"DONE in {fmt_sec(time.time() - t_all)}. Succeeded {len(todo) - len(failed)}, failed {len(failed)}"
+        + (f": {', '.join(failed)}" if failed else "."))
+    if failed:
         sys.exit(1)
 
 

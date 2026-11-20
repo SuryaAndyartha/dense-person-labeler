@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-dense_labeler.py - pelabelan pasien PADAT (setiap frame kedua, ~15 fps) untuk video FoG.
+dense_labeler.py - DENSE labelling of one target person (every N frames, default 2) in videos.
 
-Cara kerja singkat:
-  1. Klik kotak YOLOX pasien sekali, ATAU tarik untuk menggambar kotak sendiri.
-  2. Tekan Spasi: alat mengisi langkah berikutnya sementara kamu menonton.
-     - Label terakhir dari KLIK kotak YOLOX  -> langkah berikutnya ikut kotak YOLOX (biru).
-     - Label terakhir dari GAMBAR sendiri   -> langkah berikutnya menyalin kotak gambaranmu (ungu).
-     Alat BERHENTI sendiri setiap kali ragu.
-  3. Kalau kotak salah: Spasi (jeda), mundur dengan panah kiri, klik / gambar kotak yang benar, Spasi lagi.
-     Label otomatis sesudahnya dihitung ulang dari koreksimu. Setiap video mulai lagi dengan ikut YOLOX.
+How it works:
+  1. Click the target's YOLOX box once, OR drag to draw your own box.
+  2. Press Space: the tool fills in the next steps while you watch.
+     - Last label came from CLICKING a YOLOX box -> the next steps follow the YOLOX boxes (blue).
+     - Last label came from DRAWING a box       -> the next steps copy your drawn box (purple).
+     The tool STOPS by itself whenever it is unsure.
+  3. If a box is wrong: Space (pause), step back with the left arrow, click / draw the correct box, Space again.
+     Automatic labels after it are recomputed from your correction. Every video starts again by following YOLOX.
 
-Berasal dari alat label padat proyek FreezingOfGait-SelfAnalysis (tools/each_frame_label/1_2_label_padat.py);
-logika pelabelan sama, tambahan hanya roda mouse di Linux dan tampilan tajam di Windows.
-Biasanya dibuka lewat start.py. Bisa juga langsung, dari folder repo:
-  python3 labeler/dense_labeler.py --videos datasets/<nama>/videos --npz datasets/<nama>/npz \
-      --out datasets/<nama>/labels [--labels datasets/<nama>/initial_labels.csv]
-Tanpa --npz = 100% manual (gambar kotak sendiri). Lihat README.md.
+Derived from the dense labelling tool of the FreezingOfGait-SelfAnalysis project (tools/each_frame_label/1_2_label_padat.py).
+Usually opened through start.py. It can also be run directly, from the repository folder:
+  python3 labeler/dense_labeler.py --videos datasets/<name>/videos --npz datasets/<name>/npz \
+      --out datasets/<name>/labels [--initial-labels datasets/<name>/initial_labels.csv]
+Without --npz = 100% manual (draw boxes yourself). See README.md.
 """
 import argparse
 import csv
@@ -31,45 +30,45 @@ try:
     import tkinter as tk
     from tkinter import messagebox, ttk
 except ImportError:
-    sys.exit("Tkinter tidak tersedia. macOS + Homebrew: brew install python-tk@3.12 (sesuaikan versi Python).")
+    sys.exit("Tkinter is not available. macOS + Homebrew: brew install python-tk@3.12 (match your Python version).")
 try:
     import cv2
     import numpy as np
     from PIL import Image, ImageTk
 except ImportError:
-    sys.exit("Paket kurang. Jalankan: pip install opencv-python numpy pillow")
+    sys.exit("Missing packages. Run: pip install opencv-python numpy pillow")
 
-# ----------------------------------------------------------------------------- pengaturan
-FOLLOW_IOU = 0.5      # kotak berikutnya diikuti otomatis jika IoU dengan kotak sebelumnya >= ini
-ANCHOR_IOU = 0.5      # label otomatis harus cocok (IoU >= ini) dengan label awal 8-cuplikan
-PROP_MIN_SCORE = 0.1  # kotak deteksi yang boleh diikuti otomatis
+# ----------------------------------------------------------------------------- settings
+FOLLOW_IOU = 0.5      # the next box is followed automatically if its IoU with the previous box >= this
+ANCHOR_IOU = 0.5      # automatic labels must match (IoU >= this) the initial labels
+PROP_MIN_SCORE = 0.1  # detection boxes that may be followed automatically
 SPEEDS = [0.5, 1, 2, 4]
-JUMP_STEPS = 15       # Shift + panah = lompat ~1 detik
+JUMP_STEPS = 15       # Shift + arrow = jump ~1 second
 CACHE_FRAMES = 120
 AUTOSAVE_SEC = 20
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".MP4", ".AVI", ".MOV", ".MKV")
-FIELDS = ["video_id", "frame_idx", "t_sec", "status", "x1", "y1", "x2", "y2", "sumber"]
-# sumber label:
-#   manual      = kamu KLIK kotak YOLOX (atau tombol Y)    -> berikutnya ikut YOLOX
-#   gambar      = kamu MENGGAMBAR kotak (atau tombol F)    -> berikutnya menyalin kotak ini
-#   otomatis    = diisi alat dari kotak YOLOX
-#   ikut_gambar = diisi alat dengan menyalin kotak gambaranmu
-#   label_awal  = dari patient_labels.csv (8 cuplikan); tidak mengubah cara mengikuti
-WARNA = {"manual": "#22a447", "gambar": "#7b3fbf", "label_awal": "#e6a700", "otomatis": "#2f7fd8",
-         "ikut_gambar": "#b58ae0", "tidak_ada": "#8a8a8a"}
-WARNA_RGB = {"belum": (232, 232, 228), "manual": (34, 164, 71), "gambar": (123, 63, 191), "label_awal": (230, 167, 0),
-             "otomatis": (47, 127, 216), "ikut_gambar": (181, 138, 224), "tidak_ada": (138, 138, 138)}
-NAMA_SUMBER = {"manual": "klik YOLOX", "gambar": "gambar sendiri", "label_awal": "label awal",
-               "otomatis": "ikut YOLOX", "ikut_gambar": "ikut gambaranmu"}
-OTOMATIS = ("otomatis", "ikut_gambar")      # boleh dihitung ulang saat diputar
-MODE_GAMBAR = ("gambar", "ikut_gambar")     # label yang membuat langkah berikutnya menyalin kotak
-# kerangka Halpe-26 (kiri = cyan, kanan = oranye, tengah = putih)
+FIELDS = ["video_id", "frame_idx", "t_sec", "status", "x1", "y1", "x2", "y2", "source"]
+# label source:
+#   click        = you CLICKED a YOLOX box (or key Y)   -> next steps follow YOLOX
+#   drawn        = you DREW a box (or key F)            -> next steps copy this box
+#   auto         = filled in by the tool from a YOLOX box
+#   follow_drawn = filled in by the tool by copying your drawn box
+#   initial      = from the initial-labels CSV; does not change how following works
+COLORS = {"click": "#22a447", "drawn": "#7b3fbf", "initial": "#e6a700", "auto": "#2f7fd8",
+         "follow_drawn": "#b58ae0", "absent": "#8a8a8a"}
+COLORS_RGB = {"none": (232, 232, 228), "click": (34, 164, 71), "drawn": (123, 63, 191), "initial": (230, 167, 0),
+             "auto": (47, 127, 216), "follow_drawn": (181, 138, 224), "absent": (138, 138, 138)}
+SOURCE_NAMES = {"click": "clicked YOLOX", "drawn": "drawn box", "initial": "initial label",
+               "auto": "following YOLOX", "follow_drawn": "copying drawn box"}
+AUTO_SOURCES = ("auto", "follow_drawn")      # may be recomputed during playback
+DRAWN_SOURCES = ("drawn", "follow_drawn")     # labels that make the next steps copy the box
+# Halpe-26 skeleton (left = cyan, right = orange, centre = white)
 KP_EDGES = [((11, 13), "L"), ((13, 15), "L"), ((15, 24), "L"), ((15, 20), "L"), ((20, 22), "L"),
             ((12, 14), "R"), ((14, 16), "R"), ((16, 25), "R"), ((16, 21), "R"), ((21, 23), "R"),
             ((11, 12), "C"), ((5, 11), "L"), ((6, 12), "R"), ((5, 6), "C"), ((5, 7), "L"), ((7, 9), "L"),
             ((6, 8), "R"), ((8, 10), "R")]
 KP_COL = {"L": "#3fd0e0", "R": "#ff9a3c", "C": "#f2f2f2"}
-KP_SHOW = 0.3          # keypoint ditampilkan jika skornya >= ini
+KP_SHOW = 0.3          # a keypoint is shown if its score >= this
 
 
 def iou_many(b, B):
@@ -82,13 +81,13 @@ def iou_many(b, B):
     return inter / ((b[2] - b[0]) * (b[3] - b[1]) + (B[:, 2] - B[:, 0]) * (B[:, 3] - B[:, 1]) - inter + 1e-9)
 
 
-# ----------------------------------------------------------------------------- data satu video
+# ----------------------------------------------------------------------------- data of one video
 class VideoData:
     def __init__(self, vid, path, npz_path, step, anchors, out_dir):
         self.vid, self.path, self.out_csv = vid, path, out_dir / f"{vid}.csv"
         self.cap = cv2.VideoCapture(str(path))
         if not self.cap.isOpened():
-            raise IOError(f"Video tidak bisa dibuka: {path}")
+            raise IOError(f"Cannot open video: {path}")
         self.W = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)); self.H = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -102,7 +101,7 @@ class VideoData:
                 fp = d["frames_processed"].astype(int)
                 npz_step = int(np.median(np.diff(fp))) if len(fp) > 1 else 1
                 if step % npz_step == 0:
-                    # npz dipakai: langkah label = frame npz yang merupakan kelipatan step
+                    # npz is used: label steps = npz frames that are multiples of step
                     o = np.argsort(d["det_frame"], kind="stable")
                     fr, self.det_boxes, self.det_scores = d["det_frame"][o], d["det_boxes"][o].astype(float), d["det_scores"][o].astype(float)
                     frames = fp[fp % step == 0]
@@ -118,21 +117,21 @@ class VideoData:
                     self.det_slices = {int(f): (int(a), int(b)) for f, a, b in zip(u, s, e)}
                     self.has_det = True
                 else:
-                    self.npz_note = (f"npz video ini dibuat setiap {npz_step} frame, tidak cocok dengan label setiap {step} frame: "
-                                     "video ini dilabel manual")
+                    self.npz_note = (f"this video's npz was made every {npz_step} frames, which does not match labelling every {step} frames: "
+                                     "this video is labelled manually")
         self.frames = list(frames) if frames is not None else list(range(0, max(n, 1), step))
         self.index_of = {f: i for i, f in enumerate(self.frames)}
-        self.labels = {}      # indeks langkah -> dict(status, box, sumber)
-        self.extra = {}       # frame -> baris CSV di luar langkah sekarang (disimpan apa adanya)
-        self.anchors = {}     # indeks langkah -> kotak label awal
+        self.labels = {}      # step index -> dict(status, box, source)
+        self.extra = {}       # frame -> CSV row outside the current steps (kept as is)
+        self.anchors = {}     # step index -> initial-label box
         for f, box in anchors:
             i = self.nearest(f)
             self.anchors[i] = box
         self._load_csv()
         for i, box in self.anchors.items():
             if i not in self.labels:
-                self.labels[i] = dict(status="terlihat", box=box, sumber="label_awal")
-        self.cache, self.pos = OrderedDict(), 0   # pos = frame yang akan dibaca cap.read() berikutnya
+                self.labels[i] = dict(status="visible", box=box, source="initial")
+        self.cache, self.pos = OrderedDict(), 0   # pos = frame that cap.read() reads next
         self.dirty = False
 
     def nearest(self, f):
@@ -146,13 +145,13 @@ class VideoData:
             for r in csv.DictReader(fh):
                 f = int(r["frame_idx"])
                 if f not in self.index_of:
-                    # label dari jarak frame lain (mis. dulu setiap 2 frame, sekarang setiap 4): tidak tampil,
-                    # tetapi tetap ditulis kembali saat menyimpan supaya tidak hilang
+                    # a label from another frame step (e.g. earlier every 2 frames, now every 4): not shown,
+                    # but written back when saving so it is not lost
                     self.extra[f] = [r.get(k, "") for k in FIELDS]
                     continue
-                box = np.array([float(r[k]) for k in ("x1", "y1", "x2", "y2")]) if r["status"] == "terlihat" else None
-                sb = r.get("sumber") or "manual"
-                self.labels[self.index_of[f]] = dict(status=r["status"], box=box, sumber=sb if sb in WARNA else "manual")
+                box = np.array([float(r[k]) for k in ("x1", "y1", "x2", "y2")]) if r["status"] == "visible" else None
+                sb = r.get("source") or "click"
+                self.labels[self.index_of[f]] = dict(status=r["status"], box=box, source=sb if sb in COLORS else "click")
 
     def save(self):
         tmp = self.out_csv.with_suffix(".tmp")
@@ -164,7 +163,7 @@ class VideoData:
                 L, f = self.labels[i], self.frames[i]
                 b = L["box"] if L["box"] is not None else [""] * 4
                 rows[f] = ([self.vid, f, f"{f / self.fps:.3f}", L["status"]] +
-                           [f"{v:.1f}" if v != "" else "" for v in b] + [L["sumber"]])
+                           [f"{v:.1f}" if v != "" else "" for v in b] + [L["source"]])
             for f in sorted(rows):
                 w.writerow(rows[f])
         os.replace(tmp, self.out_csv)
@@ -203,12 +202,12 @@ class VideoData:
         self.cap.release()
 
 
-# ----------------------------------------------------------------------------- aplikasi
+# ----------------------------------------------------------------------------- application
 class App:
     def __init__(self, root, videos, args):
         self.root, self.videos, self.args = root, videos, args
         self.out = Path(args.out); self.out.mkdir(parents=True, exist_ok=True)
-        self.anchors = self._read_anchors(args.labels)
+        self.anchors = self._read_anchors(args.initial_labels)
         self.data, self.i = None, 0
         self.playing, self.speed_i, self.show_det, self.show_kp = False, 2, True, False
         self.undo = []
@@ -226,9 +225,10 @@ class App:
         out = {}
         if not path:
             return out
-        with open(path, newline="", encoding=self.args.labels_encoding) as fh:
+        with open(path, newline="", encoding=self.args.initial_labels_encoding) as fh:
             for r in csv.DictReader(fh):
-                if r.get("status", "terlihat") != "terlihat" or not r.get("x1"):
+                # "terlihat" = "visible" in initial labels made by the FoG labelling tool (tools/1_label_patient.py)
+                if r.get("status", "visible") not in ("visible", "terlihat") or not r.get("x1"):
                     continue
                 vid = Path(str(r["video_id"])).stem
                 try:
@@ -272,10 +272,10 @@ class App:
             vals.append(f"{vid}   ({100 * n / tot:.0f}%)" if tot else f"{vid}   ({n} label)")
         return vals
 
-    # ---------------- tampilan
+    # ---------------- layout
     def _build(self):
         r = self.root
-        r.title("Label padat pasien FoG")
+        r.title("Dense person labeler")
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         r.geometry(f"{int(sw * .9)}x{int(sh * .85)}+{int(sw * .05)}+{int(sh * .04)}")
         r.minsize(980, 620)
@@ -293,7 +293,7 @@ class App:
         self.timeline.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.msg = ttk.Label(left, text="", anchor="w"); self.msg.grid(row=2, column=0, sticky="ew", pady=(4, 0))
 
-        # panel kanan dalam kanvas yang bisa digulir: tidak pernah terpotong di layar kecil
+        # right panel inside a scrollable canvas: never cut off on small screens
         holder = ttk.Frame(r); holder.grid(row=0, column=1, sticky="ns", padx=(4, 8), pady=8)
         holder.rowconfigure(0, weight=1)
         pc = tk.Canvas(holder, width=300, highlightthickness=0, bg=ttk.Style().lookup("TFrame", "background") or None)
@@ -304,12 +304,12 @@ class App:
         pc.create_window(0, 0, anchor="nw", window=p, width=300)
         p.bind("<Configure>", lambda e: pc.configure(scrollregion=pc.bbox("all")))
 
-        def _wheel(e):                       # gulir hanya jika kursor di atas panel kanan
+        def _wheel(e):                       # scroll only when the cursor is over the right panel
             if str(e.widget).startswith(str(holder)):
                 pc.yview_scroll(int(-e.delta / 120) if abs(e.delta) >= 120 else -int(e.delta), "units")
         pc.bind_all("<MouseWheel>", _wheel)
 
-        def _wheel_linux(e, d):              # Linux/X11 mengirim roda mouse sebagai tombol 4/5
+        def _wheel_linux(e, d):              # Linux/X11 sends the mouse wheel as buttons 4/5
             if str(e.widget).startswith(str(holder)):
                 pc.yview_scroll(d, "units")
         pc.bind_all("<Button-4>", lambda e: _wheel_linux(e, -1))
@@ -332,40 +332,40 @@ class App:
         self.pbar = ttk.Progressbar(p, maximum=100); self.pbar.grid(row=7, column=0, sticky="ew", pady=(2, 10))
 
         sp = ttk.Frame(p); sp.grid(row=8, column=0, sticky="ew")
-        ttk.Label(sp, text="Kecepatan putar:").pack(side="left")
+        ttk.Label(sp, text="Playback speed:").pack(side="left")
         ttk.Button(sp, text="−", width=2, command=lambda: self.set_speed(-1)).pack(side="left", padx=(6, 0))
         self.lbl_speed = ttk.Label(sp, text="", width=5, anchor="center"); self.lbl_speed.pack(side="left")
         ttk.Button(sp, text="+", width=2, command=lambda: self.set_speed(1)).pack(side="left")
         cf = ttk.Frame(p); cf.grid(row=9, column=0, sticky="w", pady=(8, 8))
         self.var_det = tk.BooleanVar(value=True); self.var_kp = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cf, text="Kotak deteksi (H)", variable=self.var_det,
+        ttk.Checkbutton(cf, text="Detection boxes (H)", variable=self.var_det,
                         command=self._toggle_det_from_box).pack(side="left")
-        ttk.Checkbutton(cf, text="Kerangka (K)", variable=self.var_kp,
+        ttk.Checkbutton(cf, text="Skeleton (K)", variable=self.var_kp,
                         command=self._toggle_kp_from_box).pack(side="left", padx=(10, 0))
 
-        ttk.Label(p, text="Warna", style="Head.TLabel").grid(row=10, column=0, sticky="w")
+        ttk.Label(p, text="Colours", style="Head.TLabel").grid(row=10, column=0, sticky="w")
         lg = ttk.Frame(p); lg.grid(row=11, column=0, sticky="w", pady=(2, 10))
-        legend = (("klik YOLOX", "manual"), ("ikut YOLOX", "otomatis"), ("gambar sendiri", "gambar"),
-                  ("ikut gambaranmu", "ikut_gambar"), ("label awal", "label_awal"), ("tidak terlihat", "tidak_ada"))
+        legend = (("clicked YOLOX", "click"), ("following YOLOX", "auto"), ("drawn box", "drawn"),
+                  ("copying drawn box", "follow_drawn"), ("initial label", "initial"), ("not visible", "absent"))
         for k, (nm, key) in enumerate(legend):
-            tk.Label(lg, bg=WARNA[key], width=2).grid(row=k // 2, column=2 * (k % 2), sticky="w", pady=1)
+            tk.Label(lg, bg=COLORS[key], width=2).grid(row=k // 2, column=2 * (k % 2), sticky="w", pady=1)
             ttk.Label(lg, text=nm).grid(row=k // 2, column=2 * (k % 2) + 1, sticky="w", padx=(4, 10))
 
-        ttk.Label(p, text="Tombol", style="Head.TLabel").grid(row=12, column=0, sticky="w")
-        keys = [("Klik kotak", "pilih kotak YOLOX (klik lagi = kotak lain)"), ("Tarik", "gambar kotak sendiri"),
-                ("Spasi", "putar / jeda (isi otomatis)"), ("→  /  D", "langkah berikut"), ("←  /  A", "langkah sebelumnya"),
-                ("Shift + ← →", "lompat ~1 detik"), ("F", "kunci kotak ini: berikutnya menyalin kotak ini"),
-                ("Y", "kembali ikut YOLOX dari langkah ini"), ("N", "pasien tidak terlihat"),
-                ("Backspace", "hapus label langkah ini"), ("G", "ke langkah belum dilabel"), ("[  ]", "pelan / cepat"),
-                ("H / K", "kotak deteksi / kerangka"), ("Ctrl/Cmd + Z", "batal"), ("S", "simpan"),
-                ("PgUp / PgDn", "video sebelum / berikut")]
+        ttk.Label(p, text="Keys", style="Head.TLabel").grid(row=12, column=0, sticky="w")
+        keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"),
+                ("Space", "play / pause (auto-fill)"), ("→  /  D", "next step"), ("←  /  A", "previous step"),
+                ("Shift + ← →", "jump ~1 second"), ("F", "lock this box: next steps copy it"),
+                ("Y", "follow YOLOX again from this step"), ("N", "target not visible"),
+                ("Backspace", "delete this step's label"), ("G", "go to an unlabelled step"), ("[  ]", "slower / faster"),
+                ("H / K", "detection boxes / skeleton"), ("Ctrl/Cmd + Z", "undo"), ("S", "save"),
+                ("PgUp / PgDn", "previous / next video")]
         kf = ttk.Frame(p); kf.grid(row=13, column=0, sticky="ew", pady=(2, 10))
         for k, (a, b) in enumerate(keys):
             ttk.Label(kf, text=a, style="Small.TLabel", font=("TkDefaultFont", 10, "bold")).grid(row=k, column=0, sticky="w")
             ttk.Label(kf, text=b, style="Small.TLabel", wraplength=180).grid(row=k, column=1, sticky="w", padx=(8, 0))
         bf = ttk.Frame(p); bf.grid(row=14, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(bf, text="Simpan (S)", command=self.save).pack(side="left", expand=True, fill="x")
-        ttk.Button(bf, text="Belum dilabel (G)", command=self.goto_unlabeled).pack(side="left", expand=True, fill="x", padx=(4, 0))
+        ttk.Button(bf, text="Save (S)", command=self.save).pack(side="left", expand=True, fill="x")
+        ttk.Button(bf, text="Unlabelled (G)", command=self.goto_unlabeled).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         self.canvas.bind("<Configure>", lambda e: self.render())
         self.canvas.bind("<ButtonPress-1>", self._press)
@@ -380,10 +380,10 @@ class App:
         def b(seq, fn):
             try:
                 self.root.bind(seq, fn)
-            except tk.TclError:      # mis. <Command-...> di luar macOS
+            except tk.TclError:      # e.g. <Command-...> outside macOS
                 pass
 
-        def no_focus(w):             # tombol tidak mencuri Spasi / panah dari kanvas
+        def no_focus(w):             # buttons must not steal Space / arrows from the canvas
             for ch in w.winfo_children():
                 if isinstance(ch, (ttk.Button, ttk.Checkbutton)):
                     ch.configure(takefocus=0)
@@ -426,7 +426,7 @@ class App:
         try:
             self.data = VideoData(vid, self.videos[vid], self._npz(vid), self.args.step, self.anchors.get(vid, []), self.out)
         except Exception as e:
-            messagebox.showerror("Gagal membuka video", str(e)); return
+            messagebox.showerror("Cannot open video", str(e)); return
         self.undo.clear()
         keys = list(self.videos)
         self.combo.current(keys.index(vid))
@@ -435,10 +435,10 @@ class App:
         if self.data.npz_note:
             note = "  |  " + self.data.npz_note
         elif not self.data.has_det:
-            note = "  |  file npz tidak ada: tidak ada kotak deteksi, ikuti otomatis hanya menyalin kotak"
+            note = "  |  no npz file: no detection boxes, automatic following only copies the box"
         else:
             note = ""
-        self.say(f"Membuka {vid}: {len(self.data.frames)} langkah (setiap {self.args.step} frame), "
+        self.say(f"Opened {vid}: {len(self.data.frames)} steps (every {self.args.step} frames), "
                  f"{self.data.fps:.0f} fps video.{note}", warn=bool(self.data.npz_note))
         self.render()
         self.canvas.focus_set()
@@ -468,87 +468,87 @@ class App:
         self.data.dirty = True
 
     def follow_source(self, i):
-        """Cara mengisi langkah i+1 berdasarkan label langkah i: ("yolox" | "gambar" | None, kotak acuan).
-        Label awal tidak mengubah cara mengikuti: alat melihat label sebelum label awal itu."""
+        """How step i+1 is filled from the label of step i: ("yolox" | "drawn" | None, reference box).
+        Initial labels do not change how following works: the tool looks at the label before the initial label."""
         d = self.data
         L = d.labels.get(i)
-        if L is None or L["status"] != "terlihat":
+        if L is None or L["status"] != "visible":
             return None, None
         k = i
         while k >= 0:
             Lk = d.labels.get(k)
-            if Lk is None or Lk["status"] != "terlihat":
+            if Lk is None or Lk["status"] != "visible":
                 break
-            if Lk["sumber"] != "label_awal":
-                if Lk["sumber"] in MODE_GAMBAR:
-                    return "gambar", Lk["box"]
+            if Lk["source"] != "initial":
+                if Lk["source"] in DRAWN_SOURCES:
+                    return "drawn", Lk["box"]
                 break
             k -= 1
-        return ("yolox" if d.has_det else "gambar"), L["box"]
+        return ("yolox" if d.has_det else "drawn"), L["box"]
 
     def follow(self, i):
-        """Isi langkah i dari langkah i-1. Label klik / gambar / label awal tidak pernah ditimpa.
-        Mengembalikan (berhasil, pesan)."""
+        """Fill step i from step i-1. Clicked / drawn / initial labels are never overwritten.
+        Returns (success, message)."""
         d = self.data
         cur = d.labels.get(i)
         mode, ref = self.follow_source(i - 1)
 
-        def calon():
-            if mode == "gambar":
+        def candidate():
+            if mode == "drawn":
                 return ref
             B, _ = d.dets(i, PROP_MIN_SCORE)
             io = iou_many(ref, B)
             return B[int(io.argmax())] if len(io) and io.max() >= FOLLOW_IOU else None
 
-        if cur is not None and cur["sumber"] not in OTOMATIS:
-            if cur["sumber"] == "label_awal" and mode is not None:
-                c = calon()
+        if cur is not None and cur["source"] not in AUTO_SOURCES:
+            if cur["source"] == "initial" and mode is not None:
+                c = candidate()
                 if c is not None and iou_many(c, [cur["box"]])[0] < ANCHOR_IOU:
-                    return False, "Kotak yang diikuti TIDAK cocok dengan label awal (kuning). Periksa mundur dengan ←."
+                    return False, "The followed box does NOT match the initial label (yellow). Check backwards with ←."
             return True, ""
         if mode is None:
             if cur is not None:
                 self._set(i, None, record=False)
-            return False, "Langkah sebelumnya belum ada kotak pasien. Klik atau gambar kotak pasien untuk mulai."
-        c = calon()
+            return False, "The previous step has no target box. Click or draw the target's box to start."
+        c = candidate()
         if c is None:
             if cur is not None:
                 self._set(i, None, record=False)
-            return False, ("Kotak YOLOX pasien tidak jelas di sini. Klik kotak pasien, tarik kotak sendiri "
-                           "(berikutnya akan menyalin kotakmu), atau tekan N.")
+            return False, ("The target's YOLOX box is unclear here. Click the target's box, drag your own box "
+                           "(the next steps will copy it), or press N.")
         if i in d.anchors and iou_many(c, [d.anchors[i]])[0] < ANCHOR_IOU:
             if cur is not None:
                 self._set(i, None, record=False)
-            return False, "Kotak yang diikuti TIDAK cocok dengan label awal (kuning). Periksa mundur dengan ←."
-        sumber = "ikut_gambar" if mode == "gambar" else "otomatis"
-        self._set(i, dict(status="terlihat", box=np.asarray(c, float).copy(), sumber=sumber), record=False)
+            return False, "The followed box does NOT match the initial label (yellow). Check backwards with ←."
+        source = "follow_drawn" if mode == "drawn" else "auto"
+        self._set(i, dict(status="visible", box=np.asarray(c, float).copy(), source=source), record=False)
         return True, ""
 
     def lock_box(self):
-        """F: pakai kotak langkah ini sebagai acuan; langkah berikutnya menyalin kotak ini."""
+        """F: use this step's box as the reference; the next steps copy it."""
         self.stop()
         L = self.data.labels.get(self.i)
-        if L is None or L["status"] != "terlihat":
-            self.say("Belum ada kotak pasien di langkah ini untuk dikunci.", warn=True); return
-        self._set(self.i, dict(status="terlihat", box=L["box"].copy(), sumber="gambar"))
-        self.say("Kotak dikunci: langkah berikutnya menyalin kotak ini. Klik kotak YOLOX atau tekan Y untuk kembali ikut YOLOX.")
+        if L is None or L["status"] != "visible":
+            self.say("No target box in this step to lock.", warn=True); return
+        self._set(self.i, dict(status="visible", box=L["box"].copy(), source="drawn"))
+        self.say("Box locked: the next steps copy this box. Click a YOLOX box or press Y to follow YOLOX again.")
         self.render(); self.draw_timeline(full=True)
 
     def back_to_yolox(self):
-        """Y: ganti kotak langkah ini dengan kotak YOLOX yang paling mirip; langkah berikutnya ikut YOLOX lagi."""
+        """Y: replace this step's box with the most similar YOLOX box; the next steps follow YOLOX again."""
         self.stop()
         d = self.data
         L = d.labels.get(self.i)
         if not d.has_det:
-            self.say("Tidak ada file npz: tidak ada kotak YOLOX.", warn=True); return
-        if L is None or L["status"] != "terlihat":
-            self.say("Belum ada kotak pasien di langkah ini. Klik kotak YOLOX pasien.", warn=True); return
+            self.say("No npz file: no YOLOX boxes.", warn=True); return
+        if L is None or L["status"] != "visible":
+            self.say("No target box in this step yet. Click the target's YOLOX box.", warn=True); return
         B, _ = d.dets(self.i, PROP_MIN_SCORE)
         io = iou_many(L["box"], B)
         if not len(io) or io.max() < 0.3:
-            self.say("Tidak ada kotak YOLOX yang mirip di langkah ini. Klik kotak lain atau pindah langkah.", warn=True); return
-        self._set(self.i, dict(status="terlihat", box=B[int(io.argmax())].copy(), sumber="manual"))
-        self.say("Kembali ikut YOLOX mulai langkah ini.")
+            self.say("No similar YOLOX box in this step. Click another box or move to another step.", warn=True); return
+        self._set(self.i, dict(status="visible", box=B[int(io.argmax())].copy(), source="click"))
+        self.say("Following YOLOX again from this step.")
         self.render(); self.draw_timeline(full=True)
 
     def step(self, d, follow=False):
@@ -556,7 +556,7 @@ class App:
         j = min(max(self.i + d, 0), n - 1)
         if j == self.i:
             if d > 0:
-                self.say("Sudah langkah terakhir video ini. PgDn = video berikutnya.")
+                self.say("This is the last step of this video. PgDn = next video.")
             self.stop(); return False
         ok, msg = (self.follow(j) if follow and d == 1 else (True, ""))
         self.i = j
@@ -570,8 +570,8 @@ class App:
 
     def set_absent(self):
         self.stop()
-        self._set(self.i, dict(status="tidak_ada", box=None, sumber="manual"))
-        self.say("Ditandai: pasien tidak terlihat di langkah ini.")
+        self._set(self.i, dict(status="absent", box=None, source="click"))
+        self.say("Marked: target not visible in this step.")
         self.render(); self.draw_timeline(full=True)
 
     def clear_label(self):
@@ -583,11 +583,11 @@ class App:
     def do_undo(self):
         self.stop()
         if not self.undo:
-            self.say("Tidak ada yang bisa dibatalkan."); return
+            self.say("Nothing to undo."); return
         i, old = self.undo.pop()
         self._set(i, old, record=False)
         self.i = i
-        self.say("Dibatalkan."); self.render(); self.draw_timeline(full=True)
+        self.say("Undone."); self.render(); self.draw_timeline(full=True)
 
     def _first_unlabeled(self, start):
         n = len(self.data.frames)
@@ -600,19 +600,19 @@ class App:
         self.stop()
         self.i = self._first_unlabeled(self.i)
         if len(self.data.labels) == len(self.data.frames):
-            self.say("Semua langkah video ini sudah berlabel.")
+            self.say("Every step of this video is labelled.")
         self.render(); self.draw_timeline(full=False)
 
-    # ---------------- putar
+    # ---------------- playback
     def toggle_play(self):
         if self.playing:
-            self.stop(); self.say("Jeda.")
+            self.stop(); self.say("Paused.")
         else:
             cur = self.data.labels.get(self.i)
-            if cur is None or cur["status"] != "terlihat":
-                self.say("Klik kotak pasien dulu di langkah ini, lalu tekan Spasi.", warn=True); return
+            if cur is None or cur["status"] != "visible":
+                self.say("Click the target's box in this step first, then press Space.", warn=True); return
             self.playing = True
-            self.say(f"Memutar {SPEEDS[self.speed_i]}x dan mengikuti pasien. Spasi = jeda.")
+            self.say(f"Playing at {SPEEDS[self.speed_i]}x and following the target. Space = pause.")
             self._tick()
 
     def stop(self):
@@ -644,7 +644,7 @@ class App:
     def _toggle_kp_from_box(self):
         self.show_kp = self.var_kp.get()
         if self.show_kp and self.data is not None and self.data.det_kp is None:
-            self.say("File npz tidak berisi keypoint.", warn=True)
+            self.say("The npz file contains no keypoints.", warn=True)
         self.render(); self.canvas.focus_set()
 
     # ---------------- mouse
@@ -661,7 +661,7 @@ class App:
         if self.drag0 is None:
             return
         if self.rubber is None:
-            self.rubber = self.canvas.create_rectangle(*self.drag0, e.x, e.y, outline=WARNA["manual"], width=2, dash=(5, 3))
+            self.rubber = self.canvas.create_rectangle(*self.drag0, e.x, e.y, outline=COLORS["click"], width=2, dash=(5, 3))
         self.canvas.coords(self.rubber, *self.drag0, e.x, e.y)
 
     def _release(self, e):
@@ -677,15 +677,15 @@ class App:
             box = np.array([max(min(ax, bx), 0), max(min(ay, by), 0), min(max(ax, bx), d.W), min(max(ay, by), d.H)])
             if box[2] - box[0] < 4 or box[3] - box[1] < 4:
                 return
-            self._set(self.i, dict(status="terlihat", box=box, sumber="gambar"))
-            self.say("Kotak digambar. Spasi = langkah berikutnya menyalin kotak ini (ungu). Klik kotak YOLOX atau Y untuk kembali.")
+            self._set(self.i, dict(status="visible", box=box, source="drawn"))
+            self.say("Box drawn. Space = the next steps copy this box (purple). Click a YOLOX box or press Y to go back.")
         else:
             px, py = self._to_img(e.x, e.y)
             B, S = d.dets(self.i, self.args.min_score)
             inside = [k for k in range(len(B)) if B[k][0] <= px <= B[k][2] and B[k][1] <= py <= B[k][3]]
             if not inside:
-                self.say("Tidak ada kotak di titik itu. Tarik untuk menggambar kotak sendiri.", warn=True); return
-            inside.sort(key=lambda k: (B[k][2] - B[k][0]) * (B[k][3] - B[k][1]))       # kotak terkecil dulu
+                self.say("No box at that point. Drag to draw your own box.", warn=True); return
+            inside.sort(key=lambda k: (B[k][2] - B[k][0]) * (B[k][3] - B[k][1]))       # smallest box first
             pos, lst, n = self.click_cycle
             if pos is not None and pos[0] == self.i and abs(pos[1] - e.x) < 6 and abs(pos[2] - e.y) < 6 and lst == inside:
                 n = (n + 1) % len(inside)
@@ -693,9 +693,9 @@ class App:
                 n = 0
             self.click_cycle = ((self.i, e.x, e.y), inside, n)
             k = inside[n]
-            self._set(self.i, dict(status="terlihat", box=B[k].copy(), sumber="manual"))
-            extra = f" ({n + 1}/{len(inside)} kotak di titik ini, klik lagi untuk ganti)" if len(inside) > 1 else ""
-            self.say(f"Kotak YOLOX dipilih{extra}. Spasi = lanjut ikut YOLOX.")
+            self._set(self.i, dict(status="visible", box=B[k].copy(), source="click"))
+            extra = f" ({n + 1}/{len(inside)} boxes at this point, click again to switch)" if len(inside) > 1 else ""
+            self.say(f"YOLOX box selected{extra}. Space = continue following YOLOX.")
         self.render(); self.draw_timeline(full=True)
 
     def _tl_click(self, e):
@@ -705,7 +705,7 @@ class App:
         self.render(); self.draw_timeline(full=False)
         self.canvas.focus_set()
 
-    # ---------------- gambar
+    # ---------------- drawing
     def render(self):
         d = self.data
         if d is None:
@@ -746,37 +746,37 @@ class App:
                         c.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5, fill="#ffffff", outline="")
         if self.i in d.anchors:
             x1, y1, x2, y2 = R(d.anchors[self.i])
-            c.create_rectangle(x1, y1, x2, y2, outline=WARNA["label_awal"], width=2, dash=(6, 4))
+            c.create_rectangle(x1, y1, x2, y2, outline=COLORS["initial"], width=2, dash=(6, 4))
         L = d.labels.get(self.i)
-        if L is not None and L["status"] == "terlihat":
-            col = WARNA[L["sumber"]]
+        if L is not None and L["status"] == "visible":
+            col = COLORS[L["source"]]
             x1, y1, x2, y2 = R(L["box"])
             c.create_rectangle(x1, y1, x2, y2, outline=col, width=3)
-            tag = f" PASIEN · {NAMA_SUMBER[L['sumber']]} "
+            tag = f" TARGET · {SOURCE_NAMES[L['source']]} "
             ty = y1 - 2 if y1 - 22 > oy else y1 + 22
             t = c.create_text(x1 + 2, ty, text=tag, anchor="sw", fill="white", font=("TkDefaultFont", 11, "bold"))
             bb = c.bbox(t)
             c.tag_lower(c.create_rectangle(bb, fill=col, outline=col), t)
         elif L is not None:
-            c.create_text(ox + 12, oy + 12, text="Pasien tidak terlihat", anchor="nw", fill="white",
+            c.create_text(ox + 12, oy + 12, text="Target not visible", anchor="nw", fill="white",
                           font=("TkDefaultFont", 14, "bold"))
 
         n = len(d.frames)
-        self.info_frame.configure(text=f"Langkah {self.i + 1} / {n}")
+        self.info_frame.configure(text=f"Step {self.i + 1} / {n}")
         self.info_time.configure(text=f"Frame {f}   ·   {f / d.fps:.2f} s")
         if L is None:
-            txt, bg = "BELUM DILABEL", "#b9b9b3"
-        elif L["status"] == "tidak_ada":
-            txt, bg = "PASIEN TIDAK TERLIHAT", WARNA["tidak_ada"]
+            txt, bg = "NOT LABELLED", "#b9b9b3"
+        elif L["status"] == "absent":
+            txt, bg = "TARGET NOT VISIBLE", COLORS["absent"]
         else:
-            txt, bg = f"PASIEN · {NAMA_SUMBER[L['sumber']].upper()}", WARNA[L["sumber"]]
+            txt, bg = f"TARGET · {SOURCE_NAMES[L['source']].upper()}", COLORS[L["source"]]
         self.info_state.configure(text=txt, bg=bg)
         mode, _ = self.follow_source(self.i)
-        self.info_next.configure(text={"yolox": "Langkah berikutnya: ikut kotak YOLOX (biru)",
-                                       "gambar": "Langkah berikutnya: salin kotak gambaranmu (ungu)",
-                                       None: "Langkah berikutnya: menunggu kotak pasien"}[mode])
+        self.info_next.configure(text={"yolox": "Next step: follow the YOLOX box (blue)",
+                                       "drawn": "Next step: copy your drawn box (purple)",
+                                       None: "Next step: waiting for a target box"}[mode])
         k = len(d.labels)
-        self.info_prog.configure(text=f"Berlabel: {k} / {n} langkah ({100 * k / n:.1f}%)")
+        self.info_prog.configure(text=f"Labelled: {k} / {n} steps ({100 * k / n:.1f}%)")
         self.pbar.configure(value=100 * k / n)
         self.lbl_speed.configure(text=f"{SPEEDS[self.speed_i]}x")
 
@@ -789,10 +789,10 @@ class App:
         n = len(d.frames)
         if full or self.tl_img is None or self.tl_img.width() != w:
             code = np.zeros(n, np.uint8)
-            order = ["belum", "manual", "gambar", "label_awal", "otomatis", "ikut_gambar", "tidak_ada"]
+            order = ["none", "click", "drawn", "initial", "auto", "follow_drawn", "absent"]
             for i, L in d.labels.items():
-                code[i] = order.index("tidak_ada" if L["status"] == "tidak_ada" else L["sumber"])
-            pal = np.array([WARNA_RGB[k] for k in order], np.uint8)
+                code[i] = order.index("absent" if L["status"] == "absent" else L["source"])
+            pal = np.array([COLORS_RGB[k] for k in order], np.uint8)
             cols = pal[code[np.minimum((np.arange(w) * n) // w, n - 1)]]
             img = np.repeat(cols[None], h - 8, axis=0)
             self.tl_img = ImageTk.PhotoImage(Image.fromarray(img))
@@ -804,11 +804,11 @@ class App:
     def say(self, text, warn=False):
         self.msg.configure(text=text, foreground="#b3261e" if warn else "#3b3b38")
 
-    # ---------------- simpan
+    # ---------------- saving
     def save(self):
         if self.data is not None:
             self.data.save()
-            self.say(f"Tersimpan: {self.data.out_csv}")
+            self.say(f"Saved: {self.data.out_csv}")
             k = list(self.videos).index(self.data.vid)
             self.combo.configure(values=self._video_values()); self.combo.current(k)
 
@@ -826,7 +826,7 @@ class App:
         self.root.destroy()
 
 
-# ----------------------------------------------------------------------------- utilitas baris perintah
+# ----------------------------------------------------------------------------- command-line utilities
 def find_videos(folder, only):
     vids = {}
     for p in sorted(Path(folder).rglob("*")):
@@ -847,36 +847,36 @@ def merge(out_dir):
                 rd = csv.reader(fi); next(rd, None)
                 for row in rd:
                     w.writerow(row); n += 1
-    print(f"Digabung: {len(files)} video, {n} baris -> {tgt}")
+    print(f"Merged: {len(files)} videos, {n} rows -> {tgt}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Label pasien padat (setiap frame kedua) untuk video FoG.")
-    ap.add_argument("--videos", help="folder berisi video (dicari sampai subfolder)")
-    ap.add_argument("--npz", help="folder npz (dari labeler/make_npz.py atau pipeline lain dengan format sama). Tanpa ini = 100% manual")
-    ap.add_argument("--out", default="labels", help="folder hasil (satu CSV per video). Default: ./labels")
-    ap.add_argument("--labels", help="opsional: patient_labels.csv (8 cuplikan) sebagai label awal dan pemeriksa")
-    ap.add_argument("--labels-encoding", default="cp1252", help="encoding patient_labels.csv (default cp1252)")
+    ap = argparse.ArgumentParser(description="Dense labelling of one target person (every N frames) in videos.")
+    ap.add_argument("--videos", help="folder containing videos (searched recursively)")
+    ap.add_argument("--npz", help="npz folder (from labeler/make_npz.py or another pipeline with the same format). Without it = 100% manual")
+    ap.add_argument("--out", default="labels", help="output folder (one CSV per video). Default: ./labels")
+    ap.add_argument("--initial-labels", help="optional: initial-labels CSV, shown and used as a check")
+    ap.add_argument("--initial-labels-encoding", default="cp1252", help="encoding of the initial-labels CSV (default cp1252)")
     ap.add_argument("--step", type=int, default=2,
-                    help="label setiap N frame (default 2 = ~15 label/detik untuk video 30 fps). npz hanya dipakai jika "
-                         "dibuat dengan jarak frame yang membagi N (npz setiap 2 frame cocok untuk N = 2, 4, 6, ...)")
-    ap.add_argument("--min-score", type=float, default=0.3, help="kotak deteksi yang ditampilkan dan bisa diklik (default 0.3)")
-    ap.add_argument("--only", help="hanya video yang namanya mengandung teks ini")
-    ap.add_argument("--start", help="video yang dibuka pertama")
-    ap.add_argument("--gabung", action="store_true", help="gabungkan semua CSV di --out menjadi all_labels.csv lalu keluar")
+                    help="label every N frames (default 2 = ~15 labels/second for a 30 fps video). An npz is only used if "
+                         "it was made with a frame step that divides N (npz every 2 frames fits N = 2, 4, 6, ...)")
+    ap.add_argument("--min-score", type=float, default=0.3, help="detection boxes shown and clickable (default 0.3)")
+    ap.add_argument("--only", help="only videos whose name contains this text")
+    ap.add_argument("--start", help="video to open first")
+    ap.add_argument("--merge", action="store_true", help="merge all CSVs in --out into all_labels.csv, then exit")
     args = ap.parse_args()
-    if args.gabung:
+    if args.merge:
         merge(args.out); return
     if args.step < 1:
-        ap.error("--step minimal 1 (1 = setiap frame, sama dengan fps video)")
+        ap.error("--step must be at least 1 (1 = every frame, equal to the video fps)")
     if not args.videos:
-        ap.error("--videos wajib diisi")
+        ap.error("--videos is required")
     videos = find_videos(args.videos, args.only)
     if not videos:
-        sys.exit(f"Tidak ada video di {args.videos}")
+        sys.exit(f"No videos in {args.videos}")
     if args.npz and not Path(args.npz).is_dir():
-        sys.exit(f"Folder npz tidak ada: {args.npz}")
-    if os.name == "nt":                      # Windows: tampilan tajam di layar resolusi tinggi
+        sys.exit(f"npz folder not found: {args.npz}")
+    if os.name == "nt":                      # Windows: sharp rendering on high-DPI screens
         try:
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
