@@ -10,4 +10,4 @@ One folder = one dataset. The contents of this folder are never pushed (see `../
 └── labels/              created automatically: results, one CSV per video
 ```
 
-Create a new dataset with the *Dataset baru…* (new dataset) button in `start.py`, or create the folders yourself.
+Create a new dataset with the *New dataset...* button in `start.py`, or create the folders yourself.
