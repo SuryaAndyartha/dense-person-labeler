@@ -66,6 +66,7 @@ The launcher window opens:
    - *New dataset…* creates `datasets/<name>/videos/` and opens it. Put your videos there, then click *Reload*.
    - *Other folder…* picks a folder outside the repository that contains `videos/` or contains the videos directly.
 2. **Choose the frame step** (*Label every N frames*, see section 3). Default: 2.
+   **Name the object** (*Object label*, see section 4). Default: `target`.
 3. **Choose a labelling mode.** Modes that are not possible are disabled automatically.
 4. **Initial labels (optional).** Filled in automatically if `datasets/<name>/initial_labels.csv` exists.
 5. Click **Start**. The labeller opens; when you close it, you return to the launcher.
@@ -92,7 +93,17 @@ If you change N on a video that already has labels, labels at frames outside the
 
 ---
 
-## 4. How to label
+## 4. Object label: what you are labelling
+
+*Object label* is the name of the object you label in this session, e.g. `patient`, `examiner`, `police`, `dog`. It appears on the boxes and messages in the labeller and is saved in the `label` column of the CSV.
+
+To label **several objects in the same videos**, run the labeller once per object with a different name (first `patient`, then `examiner`, …). All objects of a video are stored in the same `labels/<video>.csv`; each session edits only the rows of its own label and keeps the others untouched. Labels of the other objects are shown as thin dashed boxes, each label in its own colour with its name, so you can see what is already labelled (read-only; toggle with **O**).
+
+If `initial_labels.csv` has a `label` column, only the rows with the current object label are used.
+
+---
+
+## 5. How to label
 
 1. **Click** the target's detection box once, or **drag** to draw your own box.
 2. Press **Space**: the video plays and the tool fills in the next steps while you watch.
@@ -114,7 +125,7 @@ If you change N on a video that already has labels, labels at frames outside the
 | Backspace | Delete the label of this step |
 | G | Go to an unlabelled step |
 | [ ] | Slower / faster |
-| H / K | Show detection boxes / skeleton |
+| H / K / O | Show detection boxes / skeleton / other objects' labels |
 | Ctrl/Cmd + Z | Undo |
 | S | Save |
 | PgUp / PgDn | Previous / next video |
@@ -125,7 +136,7 @@ Label colours (on the box and on the timeline): green = clicked detection box, b
 
 ---
 
-## 5. Mode "Create npz with YOLOX first"
+## 6. Mode "Create npz with YOLOX first"
 
 ### Device
 
@@ -155,7 +166,7 @@ The *Progress* box shows the device actually used (e.g. `CPUExecutionProvider`).
 
 ---
 
-## 6. Folder structure
+## 7. Folder structure
 
 ```
 dense-person-labeler/
@@ -182,25 +193,26 @@ datasets/<dataset_name>/
 └── labels/              created automatically: results, one CSV per video
 ```
 
-Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1,x2,y2,source`.
+Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1,x2,y2,source,label`, grouped by label, then frame (so `frame_idx` restarts for each label). For analysis, filter by `label` or sort by `label, frame_idx`.
 - `status`: `visible` or `absent`.
 - `source`: `click` (clicked detection box), `drawn` (drawn box), `auto` (following detection boxes), `follow_drawn` (copy of your drawn box), `initial` (initial label).
+- `label`: the object label (section 4).
 
-## 7. Without the launcher window
+## 8. Without the launcher window
 
 ```bash
-python start.py --dataset datasets/example_dataset --mode npz      [--step 2]
+python start.py --dataset datasets/example_dataset --mode npz      [--step 2] [--label-name patient]
 python start.py --dataset datasets/example_dataset --mode manual   [--step 2]
 python start.py --dataset datasets/example_dataset --mode yolox    [--step 2] [--no-pose] [--device auto|cpu|mps|cuda]
 
 python labeler/make_npz.py --videos datasets/example_dataset/videos --out datasets/example_dataset/npz --stride 2
-python labeler/dense_labeler.py --videos datasets/example_dataset/videos --npz datasets/example_dataset/npz --out datasets/example_dataset/labels --step 2
+python labeler/dense_labeler.py --videos datasets/example_dataset/videos --npz datasets/example_dataset/npz --out datasets/example_dataset/labels --step 2 --label-name patient
 python labeler/dense_labeler.py --out datasets/example_dataset/labels --merge      # merge all CSVs -> all_labels.csv
 ```
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Message | Cause | Fix |
 |---|---|---|
@@ -214,7 +226,7 @@ python labeler/dense_labeler.py --out datasets/example_dataset/labels --merge   
 
 ---
 
-## 9. npz format
+## 10. npz format
 
 One file per video, with the same name as the video:
 
@@ -232,11 +244,12 @@ Frames are read sequentially (`grab/retrieve`), so frame numbers match the label
 
 ---
 
-## 10. Testing (for developers)
+## 11. Testing (for developers)
 
 1. **Existing npz:** a dataset with videos + their npz (+ optional `initial_labels.csv`). Expected: detection boxes and yellow initial labels appear; Space follows the boxes.
 2. **100% manual:** a dataset with videos only. Expected: no detection boxes; a drawn box is copied (purple) on Space.
 3. **Create npz:** a dataset with one video. Expected: the npz is created, then the labeller opens with detection boxes.
 4. **Stop and resume:** with 2 videos, stop during the second, then *Start* again. Expected: the first video is skipped.
-5. **Frame step:** with an npz made at N = 2, choose N = 4 (npz still used) and N = 1 or 3 (labelled manually, or recreated by *Create npz*).
-6. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.
+5. **Object labels:** label a video as `patient`, then again as `examiner`. Expected: one CSV with both labels; in the second session the `patient` boxes appear as thin dashed boxes.
+6. **Frame step:** with an npz made at N = 2, choose N = 4 (npz still used) and N = 1 or 3 (labelled manually, or recreated by *Create npz*).
+7. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.

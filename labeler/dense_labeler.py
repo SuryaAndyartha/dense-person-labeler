@@ -47,7 +47,8 @@ JUMP_STEPS = 15       # Shift + arrow = jump ~1 second
 CACHE_FRAMES = 120
 AUTOSAVE_SEC = 20
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".MP4", ".AVI", ".MOV", ".MKV")
-FIELDS = ["video_id", "frame_idx", "t_sec", "status", "x1", "y1", "x2", "y2", "source"]
+FIELDS = ["video_id", "frame_idx", "t_sec", "status", "x1", "y1", "x2", "y2", "source", "label"]
+DEFAULT_LABEL = "target"   # object label name when none is given (--label-name)
 # label source:
 #   click        = you CLICKED a YOLOX box (or key Y)   -> next steps follow YOLOX
 #   drawn        = you DREW a box (or key F)            -> next steps copy this box
@@ -68,6 +69,8 @@ KP_EDGES = [((11, 13), "L"), ((13, 15), "L"), ((15, 24), "L"), ((15, 20), "L"), 
             ((11, 12), "C"), ((5, 11), "L"), ((6, 12), "R"), ((5, 6), "C"), ((5, 7), "L"), ((7, 9), "L"),
             ((6, 8), "R"), ((8, 10), "R")]
 KP_COL = {"L": "#3fd0e0", "R": "#ff9a3c", "C": "#f2f2f2"}
+# colours of OTHER objects' labels (shown thin and read-only), one per label name
+OTHER_COLORS = ["#ff6b6b", "#4ecdc4", "#ffd93d", "#f78fb3", "#9be15d", "#00b4d8", "#ff9f43", "#c56cf0"]
 KP_SHOW = 0.3          # a keypoint is shown if its score >= this
 
 
@@ -83,8 +86,9 @@ def iou_many(b, B):
 
 # ----------------------------------------------------------------------------- data of one video
 class VideoData:
-    def __init__(self, vid, path, npz_path, step, anchors, out_dir):
+    def __init__(self, vid, path, npz_path, step, anchors, out_dir, label=DEFAULT_LABEL):
         self.vid, self.path, self.out_csv = vid, path, out_dir / f"{vid}.csv"
+        self.label = label   # object label being edited in this session (e.g. patient, examiner)
         self.cap = cv2.VideoCapture(str(path))
         if not self.cap.isOpened():
             raise IOError(f"Cannot open video: {path}")
@@ -122,12 +126,26 @@ class VideoData:
         self.frames = list(frames) if frames is not None else list(range(0, max(n, 1), step))
         self.index_of = {f: i for i, f in enumerate(self.frames)}
         self.labels = {}      # step index -> dict(status, box, source)
-        self.extra = {}       # frame -> CSV row outside the current steps (kept as is)
+        self.extra = {}       # (label, frame) -> CSV row of another label or outside the current steps (kept as is)
         self.anchors = {}     # step index -> initial-label box
         for f, box in anchors:
             i = self.nearest(f)
             self.anchors[i] = box
         self._load_csv()
+        # visible boxes of OTHER object labels in this video, per frame (shown read-only)
+        self.others = {}
+        for (lab, f), row in self.extra.items():
+            if lab == self.label:
+                continue
+            r = dict(zip(FIELDS, row))
+            if r.get("status") != "visible":
+                continue
+            try:
+                box = np.array([float(r[k]) for k in ("x1", "y1", "x2", "y2")])
+            except (TypeError, ValueError):
+                continue
+            self.others.setdefault(int(f), []).append((lab, box))
+        self.other_labels = sorted({lab for lab, _ in self.extra if lab != self.label})
         for i, box in self.anchors.items():
             if i not in self.labels:
                 self.labels[i] = dict(status="visible", box=box, source="initial")
@@ -144,10 +162,11 @@ class VideoData:
         with open(self.out_csv, newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
                 f = int(r["frame_idx"])
-                if f not in self.index_of:
-                    # a label from another frame step (e.g. earlier every 2 frames, now every 4): not shown,
-                    # but written back when saving so it is not lost
-                    self.extra[f] = [r.get(k, "") for k in FIELDS]
+                lab = (r.get("label") or "").strip() or self.label   # rows without a label belong to the current label
+                if lab != self.label or f not in self.index_of:
+                    # another object's label, or a label from another frame step (e.g. earlier every 2 frames,
+                    # now every 4): not shown, but written back when saving so it is not lost
+                    self.extra[(lab, f)] = [r.get(k, "") for k in FIELDS[:-1]] + [lab]
                     continue
                 box = np.array([float(r[k]) for k in ("x1", "y1", "x2", "y2")]) if r["status"] == "visible" else None
                 sb = r.get("source") or "click"
@@ -162,10 +181,10 @@ class VideoData:
             for i in self.labels:
                 L, f = self.labels[i], self.frames[i]
                 b = L["box"] if L["box"] is not None else [""] * 4
-                rows[f] = ([self.vid, f, f"{f / self.fps:.3f}", L["status"]] +
-                           [f"{v:.1f}" if v != "" else "" for v in b] + [L["source"]])
-            for f in sorted(rows):
-                w.writerow(rows[f])
+                rows[(self.label, int(f))] = ([self.vid, f, f"{f / self.fps:.3f}", L["status"]] +
+                                              [f"{v:.1f}" if v != "" else "" for v in b] + [L["source"], self.label])
+            for key in sorted(rows, key=lambda k: (k[0], int(k[1]))):   # grouped by label, then frame
+                w.writerow(rows[key])
         os.replace(tmp, self.out_csv)
         self.dirty = False
 
@@ -206,10 +225,12 @@ class VideoData:
 class App:
     def __init__(self, root, videos, args):
         self.root, self.videos, self.args = root, videos, args
+        self.name = getattr(args, "label_name", DEFAULT_LABEL) or DEFAULT_LABEL   # object label, e.g. patient
         self.out = Path(args.out); self.out.mkdir(parents=True, exist_ok=True)
         self.anchors = self._read_anchors(args.initial_labels)
         self.data, self.i = None, 0
         self.playing, self.speed_i, self.show_det, self.show_kp = False, 2, True, False
+        self.show_others = True
         self.undo = []
         self.click_cycle = (None, [], 0)
         self.drag0, self.rubber = None, None
@@ -230,6 +251,8 @@ class App:
                 # "terlihat" = "visible" in initial labels made by the FoG labelling tool (tools/1_label_patient.py)
                 if r.get("status", "visible") not in ("visible", "terlihat") or not r.get("x1"):
                     continue
+                if (r.get("label") or "").strip() not in ("", self.name):   # initial labels of another object
+                    continue
                 vid = Path(str(r["video_id"])).stem
                 try:
                     box = np.array([float(r[k]) for k in ("x1", "y1", "x2", "y2")])
@@ -243,7 +266,13 @@ class App:
 
     def _progress(self, vid):
         p = self.out / f"{vid}.csv"
-        n_lab = max(sum(1 for _ in open(p, encoding="utf-8")) - 1, 0) if p.exists() else 0
+        n_lab = 0
+        if p.exists():                       # count only rows of the current label
+            try:
+                with open(p, newline="", encoding="utf-8") as fh:
+                    n_lab = sum(1 for r in csv.DictReader(fh) if ((r.get("label") or "").strip() or self.name) == self.name)
+            except Exception:
+                n_lab = 0
         tot = None
         z = self._npz(vid)
         if z is not None and z.exists():
@@ -275,7 +304,7 @@ class App:
     # ---------------- layout
     def _build(self):
         r = self.root
-        r.title("Dense person labeler")
+        r.title(f"Dense person labeler · {self.name}")
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         r.geometry(f"{int(sw * .9)}x{int(sh * .85)}+{int(sw * .05)}+{int(sh * .04)}")
         r.minsize(980, 620)
@@ -350,14 +379,17 @@ class App:
         for k, (nm, key) in enumerate(legend):
             tk.Label(lg, bg=COLORS[key], width=2).grid(row=k // 2, column=2 * (k % 2), sticky="w", pady=1)
             ttk.Label(lg, text=nm).grid(row=k // 2, column=2 * (k % 2) + 1, sticky="w", padx=(4, 10))
+        self.var_oth = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lg, text="Other objects' labels: thin dashed boxes (O)", variable=self.var_oth,
+                        command=self._toggle_others_from_box).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         ttk.Label(p, text="Keys", style="Head.TLabel").grid(row=12, column=0, sticky="w")
         keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"),
                 ("Space", "play / pause (auto-fill)"), ("→  /  D", "next step"), ("←  /  A", "previous step"),
                 ("Shift + ← →", "jump ~1 second"), ("F", "lock this box: next steps copy it"),
-                ("Y", "follow YOLOX again from this step"), ("N", "target not visible"),
+                ("Y", "follow YOLOX again from this step"), ("N", f"{self.name} not visible"),
                 ("Backspace", "delete this step's label"), ("G", "go to an unlabelled step"), ("[  ]", "slower / faster"),
-                ("H / K", "detection boxes / skeleton"), ("Ctrl/Cmd + Z", "undo"), ("S", "save"),
+                ("H / K / O", "detection boxes / skeleton / other labels"), ("Ctrl/Cmd + Z", "undo"), ("S", "save"),
                 ("PgUp / PgDn", "previous / next video")]
         kf = ttk.Frame(p); kf.grid(row=13, column=0, sticky="ew", pady=(2, 10))
         for k, (a, b) in enumerate(keys):
@@ -405,6 +437,8 @@ class App:
             b(k, lambda e: self.toggle_det())
         for k in ("<k>", "<K>"):
             b(k, lambda e: self.toggle_kp())
+        for k in ("<o>", "<O>"):
+            b(k, lambda e: self.toggle_others())
         for k in ("<f>", "<F>"):
             b(k, lambda e: self.lock_box())
         for k in ("<y>", "<Y>"):
@@ -424,7 +458,8 @@ class App:
                 self.data.save()
             self.data.close()
         try:
-            self.data = VideoData(vid, self.videos[vid], self._npz(vid), self.args.step, self.anchors.get(vid, []), self.out)
+            self.data = VideoData(vid, self.videos[vid], self._npz(vid), self.args.step, self.anchors.get(vid, []), self.out,
+                                  label=self.name)
         except Exception as e:
             messagebox.showerror("Cannot open video", str(e)); return
         self.undo.clear()
@@ -438,6 +473,8 @@ class App:
             note = "  |  no npz file: no detection boxes, automatic following only copies the box"
         else:
             note = ""
+        if self.data.other_labels:
+            note += f"  |  other labels in this video (thin boxes): {', '.join(self.data.other_labels)}"
         self.say(f"Opened {vid}: {len(self.data.frames)} steps (every {self.args.step} frames), "
                  f"{self.data.fps:.0f} fps video.{note}", warn=bool(self.data.npz_note))
         self.render()
@@ -509,12 +546,12 @@ class App:
         if mode is None:
             if cur is not None:
                 self._set(i, None, record=False)
-            return False, "The previous step has no target box. Click or draw the target's box to start."
+            return False, f"The previous step has no {self.name} box. Click or draw the {self.name}'s box to start."
         c = candidate()
         if c is None:
             if cur is not None:
                 self._set(i, None, record=False)
-            return False, ("The target's YOLOX box is unclear here. Click the target's box, drag your own box "
+            return False, (f"The {self.name}'s YOLOX box is unclear here. Click the {self.name}'s box, drag your own box "
                            "(the next steps will copy it), or press N.")
         if i in d.anchors and iou_many(c, [d.anchors[i]])[0] < ANCHOR_IOU:
             if cur is not None:
@@ -529,7 +566,7 @@ class App:
         self.stop()
         L = self.data.labels.get(self.i)
         if L is None or L["status"] != "visible":
-            self.say("No target box in this step to lock.", warn=True); return
+            self.say(f"No {self.name} box in this step to lock.", warn=True); return
         self._set(self.i, dict(status="visible", box=L["box"].copy(), source="drawn"))
         self.say("Box locked: the next steps copy this box. Click a YOLOX box or press Y to follow YOLOX again.")
         self.render(); self.draw_timeline(full=True)
@@ -542,7 +579,7 @@ class App:
         if not d.has_det:
             self.say("No npz file: no YOLOX boxes.", warn=True); return
         if L is None or L["status"] != "visible":
-            self.say("No target box in this step yet. Click the target's YOLOX box.", warn=True); return
+            self.say(f"No {self.name} box in this step yet. Click the {self.name}'s YOLOX box.", warn=True); return
         B, _ = d.dets(self.i, PROP_MIN_SCORE)
         io = iou_many(L["box"], B)
         if not len(io) or io.max() < 0.3:
@@ -571,7 +608,7 @@ class App:
     def set_absent(self):
         self.stop()
         self._set(self.i, dict(status="absent", box=None, source="click"))
-        self.say("Marked: target not visible in this step.")
+        self.say(f"Marked: {self.name} not visible in this step.")
         self.render(); self.draw_timeline(full=True)
 
     def clear_label(self):
@@ -610,9 +647,9 @@ class App:
         else:
             cur = self.data.labels.get(self.i)
             if cur is None or cur["status"] != "visible":
-                self.say("Click the target's box in this step first, then press Space.", warn=True); return
+                self.say(f"Click the {self.name}'s box in this step first, then press Space.", warn=True); return
             self.playing = True
-            self.say(f"Playing at {SPEEDS[self.speed_i]}x and following the target. Space = pause.")
+            self.say(f"Playing at {SPEEDS[self.speed_i]}x and following the {self.name}. Space = pause.")
             self._tick()
 
     def stop(self):
@@ -640,6 +677,12 @@ class App:
 
     def toggle_kp(self):
         self.var_kp.set(not self.var_kp.get()); self._toggle_kp_from_box()
+
+    def toggle_others(self):
+        self.var_oth.set(not self.var_oth.get()); self._toggle_others_from_box()
+
+    def _toggle_others_from_box(self):
+        self.show_others = self.var_oth.get(); self.render(); self.canvas.focus_set()
 
     def _toggle_kp_from_box(self):
         self.show_kp = self.var_kp.get()
@@ -744,6 +787,12 @@ class App:
                     if ks[q] >= KP_SHOW:
                         x, y = ox + kp[q, 0] * s, oy + kp[q, 1] * s
                         c.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5, fill="#ffffff", outline="")
+        if self.show_others:                 # other objects' labels: thin dashed box + name, read-only
+            for lab, b in d.others.get(int(f), []):
+                col = OTHER_COLORS[d.other_labels.index(lab) % len(OTHER_COLORS)]
+                x1, y1, x2, y2 = R(b)
+                c.create_rectangle(x1, y1, x2, y2, outline=col, width=2, dash=(3, 3))
+                c.create_text(x1 + 4, y1 + 3, text=lab, anchor="nw", fill=col, font=("TkDefaultFont", 10, "bold"))
         if self.i in d.anchors:
             x1, y1, x2, y2 = R(d.anchors[self.i])
             c.create_rectangle(x1, y1, x2, y2, outline=COLORS["initial"], width=2, dash=(6, 4))
@@ -752,13 +801,13 @@ class App:
             col = COLORS[L["source"]]
             x1, y1, x2, y2 = R(L["box"])
             c.create_rectangle(x1, y1, x2, y2, outline=col, width=3)
-            tag = f" TARGET · {SOURCE_NAMES[L['source']]} "
+            tag = f" {self.name.upper()} · {SOURCE_NAMES[L['source']]} "
             ty = y1 - 2 if y1 - 22 > oy else y1 + 22
             t = c.create_text(x1 + 2, ty, text=tag, anchor="sw", fill="white", font=("TkDefaultFont", 11, "bold"))
             bb = c.bbox(t)
             c.tag_lower(c.create_rectangle(bb, fill=col, outline=col), t)
         elif L is not None:
-            c.create_text(ox + 12, oy + 12, text="Target not visible", anchor="nw", fill="white",
+            c.create_text(ox + 12, oy + 12, text=f"{self.name.capitalize()} not visible", anchor="nw", fill="white",
                           font=("TkDefaultFont", 14, "bold"))
 
         n = len(d.frames)
@@ -767,14 +816,14 @@ class App:
         if L is None:
             txt, bg = "NOT LABELLED", "#b9b9b3"
         elif L["status"] == "absent":
-            txt, bg = "TARGET NOT VISIBLE", COLORS["absent"]
+            txt, bg = f"{self.name.upper()} NOT VISIBLE", COLORS["absent"]
         else:
-            txt, bg = f"TARGET · {SOURCE_NAMES[L['source']].upper()}", COLORS[L["source"]]
+            txt, bg = f"{self.name.upper()} · {SOURCE_NAMES[L['source']].upper()}", COLORS[L["source"]]
         self.info_state.configure(text=txt, bg=bg)
         mode, _ = self.follow_source(self.i)
         self.info_next.configure(text={"yolox": "Next step: follow the YOLOX box (blue)",
                                        "drawn": "Next step: copy your drawn box (purple)",
-                                       None: "Next step: waiting for a target box"}[mode])
+                                       None: f"Next step: waiting for a {self.name} box"}[mode])
         k = len(d.labels)
         self.info_prog.configure(text=f"Labelled: {k} / {n} steps ({100 * k / n:.1f}%)")
         self.pbar.configure(value=100 * k / n)
@@ -864,11 +913,15 @@ def main():
     ap.add_argument("--only", help="only videos whose name contains this text")
     ap.add_argument("--start", help="video to open first")
     ap.add_argument("--merge", action="store_true", help="merge all CSVs in --out into all_labels.csv, then exit")
+    ap.add_argument("--label-name", default=DEFAULT_LABEL,
+                    help="name of the object being labelled, saved in the 'label' column (e.g. patient, examiner, dog). "
+                         f"Default: {DEFAULT_LABEL}. Run again with another name to label another object in the same videos")
     args = ap.parse_args()
     if args.merge:
         merge(args.out); return
     if args.step < 1:
         ap.error("--step must be at least 1 (1 = every frame, equal to the video fps)")
+    args.label_name = args.label_name.strip() or DEFAULT_LABEL
     if not args.videos:
         ap.error("--videos is required")
     videos = find_videos(args.videos, args.only)

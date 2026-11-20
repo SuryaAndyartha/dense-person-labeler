@@ -39,6 +39,7 @@ TOOLS_DIR = ROOT / "labeler"
 DATASET_DIR = ROOT / "datasets"
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".MP4", ".AVI", ".MOV", ".MKV")
 MODELS = ["lightweight", "balanced", "performance"]
+DEFAULT_LABEL = "target"     # object label name when none is given
 # python module -> pip package name
 NEED_LABELER = {"cv2": "opencv-python", "numpy": "numpy", "PIL": "pillow"}
 NEED_YOLOX = {"rtmlib": "rtmlib", "onnxruntime": "onnxruntime", "certifi": "certifi"}
@@ -188,9 +189,9 @@ def check_initial_labels(path):
     return None if need <= cols else f"missing columns: {', '.join(sorted(need - cols))}"
 
 
-def labeler_cmd(ds, mode, initial_labels=None):
+def labeler_cmd(ds, mode, initial_labels=None, label=DEFAULT_LABEL):
     cmd = [sys.executable, str(TOOLS_DIR / "dense_labeler.py"), "--videos", str(ds.videos_dir), "--out", str(ds.out_dir),
-           "--step", str(ds.step)]
+           "--step", str(ds.step), "--label-name", label]
     if mode != "manual" and ds.npz_dir.is_dir():
         cmd += ["--npz", str(ds.npz_dir)]
     if initial_labels:
@@ -241,7 +242,7 @@ def run_cli(args):
         err = check_initial_labels(init)
         if err:
             sys.exit(f"Initial labels cannot be used ({init}): {err}")
-    sys.exit(subprocess.run(labeler_cmd(ds, args.mode, init)).returncode)
+    sys.exit(subprocess.run(labeler_cmd(ds, args.mode, init, args.label_name.strip() or DEFAULT_LABEL)).returncode)
 
 
 # ----------------------------------------------------------------------------- launcher window
@@ -267,7 +268,7 @@ def run_gui():
         def _build(self):
             r = self.root
             r.title("Dense person labeler · choose dataset")
-            r.geometry("820x780")
+            r.geometry("820x830")
             r.minsize(720, 640)
             r.columnconfigure(0, weight=1)
             r.rowconfigure(3, weight=1)
@@ -298,6 +299,13 @@ def run_gui():
             ttk.Label(srow, text="frames   (default 2)").pack(side="left")
             self.lbl_rate = ttk.Label(f1, text="", wraplength=780, justify="left", foreground="#555")
             self.lbl_rate.grid(row=5, column=0, sticky="w", pady=(2, 0))
+            lrow = ttk.Frame(f1); lrow.grid(row=6, column=0, sticky="w", pady=(8, 0))
+            ttk.Label(lrow, text="Object label").pack(side="left")
+            self.var_label = tk.StringVar(value=DEFAULT_LABEL)
+            ttk.Entry(lrow, textvariable=self.var_label, width=20).pack(side="left", padx=4)
+            ttk.Label(f1, text="Name of the object you label, e.g. patient, examiner, dog. Saved in the 'label' column. "
+                               "Run again with another name to label another object in the same videos.",
+                      wraplength=780, justify="left", foreground="#555").grid(row=7, column=0, sticky="w", pady=(2, 0))
 
             # 2. mode
             f2 = ttk.Frame(r, padding=(12, 8, 12, 4)); f2.grid(row=1, column=0, sticky="nsew")
@@ -366,6 +374,9 @@ def run_gui():
             self.log.configure(state="disabled")
 
         # ---------------- dataset
+        def get_label(self):
+            return self.var_label.get().strip() or DEFAULT_LABEL
+
         def get_step(self):
             try:
                 return min(max(int(float(self.var_step.get())), 1), 30)
@@ -582,7 +593,7 @@ def run_gui():
                 self.proc.terminate()
 
         def run_labeler(self, ds, mode, init):
-            cmd = labeler_cmd(ds, mode, init)
+            cmd = labeler_cmd(ds, mode, init, self.get_label())
             self.write("$ " + " ".join(f'"{x}"' if " " in x else x for x in cmd))
             try:
                 p = subprocess.Popen(cmd)
@@ -628,6 +639,8 @@ def main():
     ap.add_argument("--no-pose", action="store_true", help="for --mode yolox: skip RTMPose (faster)")
     ap.add_argument("--initial-labels", help="initial-labels CSV (default <dataset>/initial_labels.csv if present)")
     ap.add_argument("--step", type=int, default=2, help="label every N frames (default 2; 1 = every frame)")
+    ap.add_argument("--label-name", default=DEFAULT_LABEL,
+                    help=f"name of the object being labelled, e.g. patient, examiner, dog (default {DEFAULT_LABEL})")
     args = ap.parse_args()
     if args.dataset:
         run_cli(args)
