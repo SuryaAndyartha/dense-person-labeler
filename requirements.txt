@@ -1,0 +1,12 @@
+# Version ranges that install on most computers and Python versions.
+# The exact tested combination is in requirements-tested.txt.
+
+# all modes
+opencv-python>=4.8,<5
+numpy>=1.24,<3
+pillow>=9
+
+# only for "Create npz with YOLOX"
+rtmlib==0.0.16          # pinned: the code uses rtmlib internals that may change between versions
+onnxruntime>=1.17       # NVIDIA GPU: replace with onnxruntime-gpu
+certifi

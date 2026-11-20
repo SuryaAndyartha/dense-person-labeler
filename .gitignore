@@ -1,0 +1,15 @@
+# Dataset contents (videos, npz, labels) are never pushed
+datasets/*
+!datasets/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS / editor
+.DS_Store
+._*
+.vscode/
+.idea/
