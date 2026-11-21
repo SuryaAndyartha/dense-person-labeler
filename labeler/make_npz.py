@@ -140,11 +140,17 @@ def active_providers(model):
         return ["(unknown)"]
 
 
-def build_models(model, device, det_thr, nms_thr, with_pose):
+def model_config(model):
     try:
-        from rtmlib import YOLOX, RTMPose, BodyWithFeet
+        from rtmlib import BodyWithFeet
     except ImportError:
         sys.exit("rtmlib is not installed. Run: pip install rtmlib onnxruntime")
+    return BodyWithFeet.MODE[model]
+
+
+def build_part(part, cfg, device, det_thr, nms_thr):
+    """Load one model: part = "det" (YOLOX) or "pose" (RTMPose)."""
+    from rtmlib import YOLOX, RTMPose
 
     class YOLOXWithScores(YOLOX):
         """rtmlib's YOLOX drops the scores and uses a fixed 0.3 threshold; ByteTrack needs both."""
@@ -152,14 +158,25 @@ def build_models(model, device, det_thr, nms_thr, with_pose):
             img, ratio = self.preprocess(image)
             return decode_yolox(self.inference(img), ratio, self.model_input_size, self.score_thr, self.nms_thr)
 
-    cfg = BodyWithFeet.MODE[model]
-    det = YOLOXWithScores(cfg["det"], model_input_size=cfg["det_input_size"], nms_thr=nms_thr,
-                          score_thr=det_thr, backend="onnxruntime", device=device)
-    pose = None
-    if with_pose:
-        pose = RTMPose(cfg["pose"], model_input_size=cfg["pose_input_size"], to_openpose=False,
-                       backend="onnxruntime", device=device)
-    return det, pose, cfg
+    if part == "det":
+        return YOLOXWithScores(cfg["det"], model_input_size=cfg["det_input_size"], nms_thr=nms_thr,
+                               score_thr=det_thr, backend="onnxruntime", device=device)
+    return RTMPose(cfg["pose"], model_input_size=cfg["pose_input_size"], to_openpose=False,
+                   backend="onnxruntime", device=device)
+
+
+def test_part(part, model):
+    """Run a model once on a test image. Raises if this device cannot run it (e.g. some ops fail on CoreML)."""
+    img = np.random.default_rng(0).integers(0, 255, (480, 640, 3), dtype=np.uint8)
+    if part == "det":
+        model(img)
+    else:
+        model(img, [[200.0, 40.0, 440.0, 460.0]])
+
+
+def short_error(e, n=200):
+    txt = f"{e.__class__.__name__}: {e}".splitlines()[0]
+    return txt if len(txt) <= n else txt[:n] + "..."
 
 
 # ----------------------------------------------------------------------------- video (copied from Stage 2)
@@ -373,22 +390,24 @@ def main():
         args.device = "cpu"
     say(f"Loading YOLOX{' + RTMPose' if not args.no_pose else ''} ({args.model}, {args.device}). "
         "First time: the models are downloaded (needs internet).")
+    cfg = model_config(args.model)
+    names = {"det": "YOLOX", "pose": "RTMPose"}
 
     def is_download_error(e):
         txt = f"{e.__class__.__name__}: {e}"
         return ("CERTIFICATE_VERIFY_FAILED" in txt or "urlopen error" in txt or "URLError" in txt), txt
 
-    def load(device):
-        """Load the models. If the download fails because of certificates, retry once with certifi's certificates."""
+    def load(part, device):
+        """Load one model. If the download fails because of certificates, retry once with certifi's certificates."""
         try:
-            return build_models(args.model, device, args.det_thr, args.nms_thr, not args.no_pose)
+            return build_part(part, cfg, device, args.det_thr, args.nms_thr)
         except SystemExit:
             raise
         except Exception as e:
             dl, txt = is_download_error(e)
             if dl and "CERTIFICATE_VERIFY_FAILED" in txt and use_certifi():
                 say("Python's default SSL certificates failed; retrying with certifi's certificates.")
-                return load(device)
+                return load(part, device)
             if dl:
                 say("[FAILED] The models could not be downloaded: " + txt)
                 say("Check your internet connection (needs access to download.openmmlab.com or huggingface.co).\n"
@@ -398,18 +417,30 @@ def main():
                 sys.exit(1)
             raise
 
-    try:
-        det, pose, cfg = load(args.device)
-    except SystemExit:
-        raise
-    except Exception as e:
-        if args.device == "cpu":
+    def ready(part, device):
+        """Load one model on the chosen device and test it once. If loading or the test fails, use cpu instead."""
+        try:
+            m = load(part, device)
+            if device != "cpu":
+                test_part(part, m)
+                say(f"Device test: {names[part]} works on {device}.")
+            return m, device
+        except SystemExit:
             raise
-        say(f"[WARNING] device {args.device} failed ({e.__class__.__name__}: {e}). Using cpu.")
-        args.device = "cpu"
-        det, pose, cfg = load("cpu")
-    say(f"Devices in use: YOLOX {active_providers(det)}"
-        + (f", RTMPose {active_providers(pose)}" if pose is not None else ""))
+        except Exception as e:
+            if device == "cpu":
+                raise
+            say(f"[WARNING] Device test: {names[part]} failed on {device} ({short_error(e)}). Using cpu for {names[part]}.")
+            return load(part, "cpu"), "cpu"
+
+    det, det_dev = ready("det", args.device)
+    pose, pose_dev = ready("pose", args.device) if not args.no_pose else (None, None)
+
+    def describe():
+        args.device = det_dev if pose is None or pose_dev == det_dev else f"yolox={det_dev}, rtmpose={pose_dev}"
+        return (f"Devices in use: YOLOX {active_providers(det)}"
+                + (f", RTMPose {active_providers(pose)}" if pose is not None else ""))
+    say(describe())
 
     t_all, failed = time.time(), []
     try:
@@ -417,10 +448,24 @@ def main():
             say(f"[VIDEO] {k}/{len(todo)} {vid}")
             try:
                 n, secs = process_video(path, out, det, pose, cfg, args, k, len(todo))
-                say(f"[OK] {vid}: {n} steps in {fmt_sec(secs)} -> {out / (vid + '.npz')}")
             except Exception as e:
-                failed.append(vid)
-                say(f"[FAILED] {vid}: {e.__class__.__name__}: {e}")
+                if det_dev == "cpu" and pose_dev in (None, "cpu"):
+                    failed.append(vid)
+                    say(f"[FAILED] {vid}: {short_error(e, 400)}")
+                    continue
+                # safety net: the device passed the test but failed on real frames -> everything to cpu, retry
+                say(f"[WARNING] {vid} failed on {args.device} ({short_error(e)}). Switching to cpu and retrying this video.")
+                det, det_dev = load("det", "cpu"), "cpu"
+                if pose is not None:
+                    pose, pose_dev = load("pose", "cpu"), "cpu"
+                say(describe())
+                try:
+                    n, secs = process_video(path, out, det, pose, cfg, args, k, len(todo))
+                except Exception as e2:
+                    failed.append(vid)
+                    say(f"[FAILED] {vid}: {short_error(e2, 400)}")
+                    continue
+            say(f"[OK] {vid}: {n} steps in {fmt_sec(secs)} -> {out / (vid + '.npz')}")
     except KeyboardInterrupt:
         say("Stopped. Finished videos are kept; run again to continue.")
         sys.exit(130)
