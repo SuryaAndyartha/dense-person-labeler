@@ -76,6 +76,7 @@ KP_SHOW = 0.3
 # warning when the current label's box overlaps another object's label (IoU >= OVERLAP_IOU). It is shown once when an
 # overlap starts; it is shown again only after the overlap was gone for at least OVERLAP_GAP_SEC seconds of video.
 OVERLAP_IOU = 0.5
+ALERT_COLOR = "#ff6a00"   # banner and highlighted box of an overlap warning
 OVERLAP_GAP_SEC = 1.0          # a keypoint is shown if its score >= this
 
 
@@ -254,6 +255,7 @@ class App:
         self.data, self.i = None, 0
         self.playing, self.speed_i, self.show_det, self.show_kp = False, 2, True, False
         self.show_others = True
+        self.overlap_alert = None   # dict(i=step, ov=[(label, IoU)], paused=bool) while an overlap warning is shown
         self.undo = []
         self.click_cycle = (None, [], 0)
         self.drag0, self.rubber = None, None
@@ -586,6 +588,7 @@ class App:
         self._set(i, dict(status="visible", box=np.asarray(c, float).copy(), source=source), record=False)
         ov = self.new_overlaps(i)
         if ov:
+            self.overlap_alert = dict(i=i, ov=ov, paused=True)
             return False, self.overlap_msg(ov) + " Press Space to continue if this is intended."
         return True, ""
 
@@ -612,6 +615,14 @@ class App:
         for j in range(max(0, i - gap), i):
             recent |= set(self._overlaps_at(j))
         return [(lab, v) for lab, v in sorted(now.items()) if lab not in recent]
+
+    def warn_overlap(self):
+        """After a click, a drawn box or Y at the current step: show the overlap warning if an overlap starts here."""
+        self.overlap_alert = None
+        ov = self.new_overlaps(self.i)
+        if ov:
+            self.overlap_alert = dict(i=self.i, ov=ov, paused=False)
+            self.say(self.overlap_msg(ov), warn=True)
 
     def overlap_msg(self, ov):
         names = ", ".join(f"'{lab}' (IoU {v:.2f})" for lab, v in ov)
@@ -642,9 +653,7 @@ class App:
             self.say("No similar YOLOX box in this step. Click another box or move to another step.", warn=True); return
         self._set(self.i, dict(status="visible", box=B[int(io.argmax())].copy(), source="click"))
         self.say("Following YOLOX again from this step.")
-        ov = self.new_overlaps(self.i)
-        if ov:
-            self.say(self.overlap_msg(ov), warn=True)
+        self.warn_overlap()
         self.render(); self.draw_timeline(full=True)
 
     def step(self, d, follow=False):
@@ -708,6 +717,7 @@ class App:
             if cur is None or cur["status"] != "visible":
                 self.say(f"Click the {self.name}'s box in this step first, then press Space.", warn=True); return
             self.playing = True
+            self.overlap_alert = None
             self.say(f"Playing at {SPEEDS[self.speed_i]}x and following the {self.name}. Space = pause.")
             self._tick()
 
@@ -781,9 +791,7 @@ class App:
                 return
             self._set(self.i, dict(status="visible", box=box, source="drawn"))
             self.say("Box drawn. Space = the next steps copy this box (purple). Click a YOLOX box or press Y to go back.")
-            ov = self.new_overlaps(self.i)
-            if ov:
-                self.say(self.overlap_msg(ov), warn=True)
+            self.warn_overlap()
         else:
             px, py = self._to_img(e.x, e.y)
             B, S = d.dets(self.i, self.args.min_score)
@@ -801,9 +809,7 @@ class App:
             self._set(self.i, dict(status="visible", box=B[k].copy(), source="click"))
             extra = f" ({n + 1}/{len(inside)} boxes at this point, click again to switch)" if len(inside) > 1 else ""
             self.say(f"YOLOX box selected{extra}. Space = continue following YOLOX.")
-            ov = self.new_overlaps(self.i)
-            if ov:
-                self.say(self.overlap_msg(ov), warn=True)
+            self.warn_overlap()
         self.render(); self.draw_timeline(full=True)
 
     def _tl_click(self, e):
@@ -852,10 +858,20 @@ class App:
                     if ks[q] >= KP_SHOW:
                         x, y = ox + kp[q, 0] * s, oy + kp[q, 1] * s
                         c.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5, fill="#ffffff", outline="")
-        if self.show_others:                 # other objects' labels: thin dashed box + name, read-only
+        al = self.overlap_alert
+        if al is not None and al["i"] != self.i:
+            al = self.overlap_alert = None          # the warning belongs to another step
+        hit = {lab for lab, _ in al["ov"]} if al is not None else set()
+        if self.show_others or hit:          # other objects' labels: thin dashed box + name, read-only
             for lab, b in d.others.get(int(f), []):
-                col = OTHER_COLORS[d.other_labels.index(lab) % len(OTHER_COLORS)]
                 x1, y1, x2, y2 = R(b)
+                if lab in hit:                # the label being overlapped: thick and bright while warned
+                    c.create_rectangle(x1, y1, x2, y2, outline=ALERT_COLOR, width=5)
+                    c.create_text(x1 + 6, y1 + 5, text=lab, anchor="nw", fill=ALERT_COLOR, font=("TkDefaultFont", 13, "bold"))
+                    continue
+                if not self.show_others:
+                    continue
+                col = OTHER_COLORS[d.other_labels.index(lab) % len(OTHER_COLORS)]
                 c.create_rectangle(x1, y1, x2, y2, outline=col, width=2, dash=(3, 3))
                 c.create_text(x1 + 4, y1 + 3, text=lab, anchor="nw", fill=col, font=("TkDefaultFont", 10, "bold"))
         if self.i in d.anchors:
@@ -874,6 +890,12 @@ class App:
         elif L is not None:
             c.create_text(ox + 12, oy + 12, text=f"{self.name.capitalize()} not visible", anchor="nw", fill="white",
                           font=("TkDefaultFont", 14, "bold"))
+        if al is not None:                   # overlap warning banner across the top of the video
+            names = ", ".join(f"'{lab}' (IoU {v:.2f})" for lab, v in al["ov"])
+            tail = "Space = continue if intended" if al["paused"] else "check that this is intended"
+            c.create_rectangle(ox, oy, ox + dw, oy + 36, fill=ALERT_COLOR, outline="")
+            c.create_text(ox + dw / 2, oy + 18, text=f"⚠  This {self.name} box overlaps {names}  ·  {tail}",
+                          fill="white", font=("TkDefaultFont", 14, "bold"), width=max(dw - 20, 100))
 
         n = len(d.frames)
         self.info_frame.configure(text=f"Step {self.i + 1} / {n}")

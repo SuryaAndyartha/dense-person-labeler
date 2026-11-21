@@ -105,7 +105,8 @@ If `initial_labels.csv` has a `label` column, only the rows with the current obj
 **Overlap warning.** The same box may carry two different labels; they are then treated as two different objects. To make sure this is intended, the labeller warns when the current label's box overlaps another object's label (IoU ≥ 0.5):
 
 - The warning appears **once, when an overlap starts**, e.g. `This patient box overlaps another object's label: 'examiner' (IoU 0.83).` While the overlap continues, it does not repeat.
-- During playback the video **pauses** at that step; press Space to continue if the overlap is intended. After a click, a drawn box or **Y**, only the message is shown.
+- The warning is shown as an **orange banner across the top of the video**, the overlapped object's box is drawn **thick in orange**, and the message also appears in red below the video. It disappears when you move to another step or continue.
+- During playback the video **pauses** at that step; press Space to continue if the overlap is intended. After a click, a drawn box or **Y**, the warning is shown without pausing.
 - The overlap counts as finished once it has been gone for **1 second of video** (e.g. 15 steps for a 30 fps video labelled every 2 frames), so a box that briefly jitters does not trigger it again. If the current label later overlaps that object again, the warning appears again.
 - Each other label is checked separately: overlapping a different labelled object always gives its own warning.
 - Nothing is blocked; the label is saved as you choose.
