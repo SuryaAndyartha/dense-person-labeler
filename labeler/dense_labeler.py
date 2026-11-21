@@ -72,7 +72,11 @@ KP_EDGES = [((11, 13), "L"), ((13, 15), "L"), ((15, 24), "L"), ((15, 20), "L"), 
 KP_COL = {"L": "#3fd0e0", "R": "#ff9a3c", "C": "#f2f2f2"}
 # colours of OTHER objects' labels (shown thin and read-only), one per label name
 OTHER_COLORS = ["#ff6b6b", "#4ecdc4", "#ffd93d", "#f78fb3", "#9be15d", "#00b4d8", "#ff9f43", "#c56cf0"]
-KP_SHOW = 0.3          # a keypoint is shown if its score >= this
+KP_SHOW = 0.3
+# warning when the current label's box overlaps another object's label (IoU >= OVERLAP_IOU). It is shown once when an
+# overlap starts; it is shown again only after the overlap was gone for at least OVERLAP_GAP_SEC seconds of video.
+OVERLAP_IOU = 0.5
+OVERLAP_GAP_SEC = 1.0          # a keypoint is shown if its score >= this
 
 
 def backup_to_trash(path, trash_dir):
@@ -580,7 +584,38 @@ class App:
             return False, "The followed box does NOT match the initial label (yellow). Check backwards with ←."
         source = "follow_drawn" if mode == "drawn" else "auto"
         self._set(i, dict(status="visible", box=np.asarray(c, float).copy(), source=source), record=False)
+        ov = self.new_overlaps(i)
+        if ov:
+            return False, self.overlap_msg(ov) + " Press Space to continue if this is intended."
         return True, ""
+
+    def _overlaps_at(self, j):
+        """Other labels whose box at step j overlaps the current label's box: {label: IoU}."""
+        d = self.data
+        L = d.labels.get(j)
+        if L is None or L["status"] != "visible" or L["box"] is None:
+            return {}
+        out = {}
+        for lab, b in d.others.get(int(d.frames[j]), []):
+            v = float(iou_many(L["box"], [b])[0])
+            if v >= OVERLAP_IOU:
+                out[lab] = max(v, out.get(lab, 0.0))
+        return out
+
+    def new_overlaps(self, i):
+        """Overlaps that START at step i: the same other label was not overlapped in the previous ~1 second of steps."""
+        now = self._overlaps_at(i)
+        if not now:
+            return []
+        gap = max(1, int(round(OVERLAP_GAP_SEC * self.data.fps / max(self.args.step, 1))))
+        recent = set()
+        for j in range(max(0, i - gap), i):
+            recent |= set(self._overlaps_at(j))
+        return [(lab, v) for lab, v in sorted(now.items()) if lab not in recent]
+
+    def overlap_msg(self, ov):
+        names = ", ".join(f"'{lab}' (IoU {v:.2f})" for lab, v in ov)
+        return f"This {self.name} box overlaps another object's label: {names}."
 
     def lock_box(self):
         """F: use this step's box as the reference; the next steps copy it."""
@@ -607,6 +642,9 @@ class App:
             self.say("No similar YOLOX box in this step. Click another box or move to another step.", warn=True); return
         self._set(self.i, dict(status="visible", box=B[int(io.argmax())].copy(), source="click"))
         self.say("Following YOLOX again from this step.")
+        ov = self.new_overlaps(self.i)
+        if ov:
+            self.say(self.overlap_msg(ov), warn=True)
         self.render(); self.draw_timeline(full=True)
 
     def step(self, d, follow=False):
@@ -743,6 +781,9 @@ class App:
                 return
             self._set(self.i, dict(status="visible", box=box, source="drawn"))
             self.say("Box drawn. Space = the next steps copy this box (purple). Click a YOLOX box or press Y to go back.")
+            ov = self.new_overlaps(self.i)
+            if ov:
+                self.say(self.overlap_msg(ov), warn=True)
         else:
             px, py = self._to_img(e.x, e.y)
             B, S = d.dets(self.i, self.args.min_score)
@@ -760,6 +801,9 @@ class App:
             self._set(self.i, dict(status="visible", box=B[k].copy(), source="click"))
             extra = f" ({n + 1}/{len(inside)} boxes at this point, click again to switch)" if len(inside) > 1 else ""
             self.say(f"YOLOX box selected{extra}. Space = continue following YOLOX.")
+            ov = self.new_overlaps(self.i)
+            if ov:
+                self.say(self.overlap_msg(ov), warn=True)
         self.render(); self.draw_timeline(full=True)
 
     def _tl_click(self, e):

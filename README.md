@@ -102,6 +102,14 @@ To label **several objects in the same videos**, run the labeller once per objec
 
 If `initial_labels.csv` has a `label` column, only the rows with the current object label are used.
 
+**Overlap warning.** The same box may carry two different labels; they are then treated as two different objects. To make sure this is intended, the labeller warns when the current label's box overlaps another object's label (IoU ≥ 0.5):
+
+- The warning appears **once, when an overlap starts**, e.g. `This patient box overlaps another object's label: 'examiner' (IoU 0.83).` While the overlap continues, it does not repeat.
+- During playback the video **pauses** at that step; press Space to continue if the overlap is intended. After a click, a drawn box or **Y**, only the message is shown.
+- The overlap counts as finished once it has been gone for **1 second of video** (e.g. 15 steps for a 30 fps video labelled every 2 frames), so a box that briefly jitters does not trigger it again. If the current label later overlaps that object again, the warning appears again.
+- Each other label is checked separately: overlapping a different labelled object always gives its own warning.
+- Nothing is blocked; the label is saved as you choose.
+
 ---
 
 ## 5. How to label
@@ -146,10 +154,17 @@ The *Device* list shows only what is **available on this computer**:
 | Device | Meaning | Shown when |
 |---|---|---|
 | `cuda` | NVIDIA graphics card. Fastest | `onnxruntime-gpu` is installed and an NVIDIA GPU is found |
-| `mps` | Apple accelerator via CoreML | A Mac whose onnxruntime supports CoreML. Not always faster; falls back to `cpu` automatically if it fails |
+| `mps` | Apple accelerator via CoreML | A Mac whose onnxruntime supports CoreML. Not always faster; models that cannot run on it use `cpu` automatically |
 | `cpu` | Regular processor. Slowest | Always |
 
-The *Progress* box shows the device actually used (e.g. `CPUExecutionProvider`).
+A device in this list is installed, but that does not guarantee every model runs on it (for example, the YOLOX model fails on CoreML/`mps` while RTMPose works). So the program never fails because of the device choice:
+
+1. Each model (YOLOX, RTMPose) is loaded on the chosen device and **tested once** on a test image.
+2. A model that fails to load or fails the test is **switched to `cpu` automatically**; the other model stays on the chosen device (e.g. YOLOX on `cpu`, RTMPose on `mps`).
+3. If a model passes the test but fails on a real video, everything switches to `cpu` and that video is **retried**.
+4. The *Progress* box reports the result, e.g. `Device test: YOLOX failed on mps … Using cpu for YOLOX` and `Devices in use: …`. The devices used are also saved in the npz `meta`.
+
+In the worst case the run is as fast as `cpu`, never a failure.
 
 ### Time and speed-ups
 
@@ -261,7 +276,7 @@ Frames are read sequentially (`grab/retrieve`), so frame numbers match the label
 2. **100% manual:** a dataset with videos only. Expected: no detection boxes; a drawn box is copied (purple) on Space.
 3. **Create npz:** a dataset with one video. Expected: the npz is created, then the labeller opens with detection boxes.
 4. **Stop and resume:** with 2 videos, stop during the second, then *Start* again. Expected: the first video is skipped.
-5. **Object labels:** label a video as `patient`, then again as `examiner`. Expected: one CSV with both labels; in the second session the `patient` boxes appear as thin dashed boxes.
+5. **Object labels:** label a video as `patient`, then again as `examiner`. Expected: one CSV with both labels; in the second session the `patient` boxes appear as thin dashed boxes. Following the `patient` box as `examiner` pauses once with an overlap warning; continuing on it does not warn again.
 6. **Frame step:** with an npz made at N = 2, choose N = 4 (npz still used) and N = 1 or 3 (labelled manually, or recreated by *Create npz*).
 7. **Recreate npz:** with all videos having a matching npz, tick *Recreate existing npz too*. Expected: the YOLOX mode becomes available, a confirmation lists the npz to overwrite, then all are recreated.
 8. **Delete:** *Manage files…* → delete the npz of one video (it then counts as "without npz") and the labels of another; *Clear all … labels* in the labeller. Expected: files appear in `.trash/`, other objects' labels are kept.
