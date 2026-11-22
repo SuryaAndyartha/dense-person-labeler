@@ -76,6 +76,11 @@ KP_SHOW = 0.3
 # warning when the current label's box overlaps another object's label (IoU >= OVERLAP_IOU). It is shown once when an
 # overlap starts; it is shown again only after the overlap was gone for at least OVERLAP_GAP_SEC seconds of video.
 OVERLAP_IOU = 0.5
+# resize handles on the current label's box: grab a corner or an edge within this many screen pixels
+HANDLE_PX = 7
+HANDLE_CURSORS = {"nw": "top_left_corner", "ne": "top_right_corner", "sw": "bottom_left_corner",
+                  "se": "bottom_right_corner", "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
+                  "w": "sb_h_double_arrow", "e": "sb_h_double_arrow"}
 ALERT_COLOR = "#ff6a00"   # banner and highlighted box of an overlap warning
 OVERLAP_GAP_SEC = 1.0          # a keypoint is shown if its score >= this
 
@@ -259,6 +264,7 @@ class App:
         self.undo = []
         self.click_cycle = (None, [], 0)
         self.drag0, self.rubber = None, None
+        self.resize = None   # dict(h=handle, new=box) while a resize handle is being dragged
         self.view = (1.0, 0, 0)
         self.tl_img = None
         self._build()
@@ -409,7 +415,7 @@ class App:
                         command=self._toggle_others_from_box).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         ttk.Label(p, text="Keys", style="Head.TLabel").grid(row=12, column=0, sticky="w")
-        keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"),
+        keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"), ("Drag a handle", "resize the current box"),
                 ("Space", "play / pause (auto-fill)"), ("→  /  D", "next step"), ("←  /  A", "previous step"),
                 ("Shift + ← →", "jump ~1 second"), ("F", "lock this box: next steps copy it"),
                 ("Y", "follow YOLOX again from this step"), ("N", f"{self.name} not visible"),
@@ -430,6 +436,7 @@ class App:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<Motion>", self._hover)
         self.timeline.bind("<Configure>", lambda e: self.draw_timeline(full=True))
         self.timeline.bind("<ButtonPress-1>", self._tl_click)
         self.timeline.bind("<B1-Motion>", self._tl_click)
@@ -764,12 +771,59 @@ class App:
         s, ox, oy = self.view
         return (x - ox) / s, (y - oy) / s
 
+    def _handle_at(self, x, y):
+        """Resize handle of the current step's box under screen point (x, y): nw, n, ne, e, se, s, sw, w or None."""
+        d = self.data
+        L = d.labels.get(self.i) if d is not None else None
+        if L is None or L["status"] != "visible" or L["box"] is None or self.view is None:
+            return None
+        s, ox, oy = self.view
+        x1, y1, x2, y2 = (ox + L["box"][0] * s, oy + L["box"][1] * s, ox + L["box"][2] * s, oy + L["box"][3] * s)
+        t = HANDLE_PX
+        if not (x1 - t <= x <= x2 + t and y1 - t <= y <= y2 + t):
+            return None
+        v = "n" if abs(y - y1) <= t else ("s" if abs(y - y2) <= t else "")
+        h = "w" if abs(x - x1) <= t else ("e" if abs(x - x2) <= t else "")
+        return (v + h) or None
+
+    def _hover(self, e):
+        h = None if (self.playing or self.drag0 is not None or self.resize is not None) else self._handle_at(e.x, e.y)
+        cur = HANDLE_CURSORS.get(h, "")
+        if self.canvas.cget("cursor") != cur:
+            self.canvas.configure(cursor=cur)
+
     def _press(self, e):
         self.stop()
         self.canvas.focus_set()
+        h = self._handle_at(e.x, e.y)
+        if h is not None:                    # start resizing the current box (only its width / height)
+            self.resize = dict(h=h, new=None)
+            self.drag0 = None
+            return
         self.drag0 = (e.x, e.y)
 
     def _drag(self, e):
+        if self.resize is not None:
+            d = self.data
+            b = d.labels[self.i]["box"].copy()
+            px, py = self._to_img(e.x, e.y)
+            px, py = min(max(px, 0), d.W), min(max(py, 0), d.H)
+            h = self.resize["h"]
+            if "w" in h:
+                b[0] = min(px, b[2] - 4)
+            if "e" in h:
+                b[2] = max(px, b[0] + 4)
+            if "n" in h:
+                b[1] = min(py, b[3] - 4)
+            if "s" in h:
+                b[3] = max(py, b[1] + 4)
+            self.resize["new"] = b
+            s, ox, oy = self.view
+            xy = (ox + b[0] * s, oy + b[1] * s, ox + b[2] * s, oy + b[3] * s)
+            if self.rubber is None:
+                self.rubber = self.canvas.create_rectangle(*xy, outline=COLORS["drawn"], width=2, dash=(5, 3))
+            self.canvas.coords(self.rubber, *xy)
+            return
         if self.drag0 is None:
             return
         if self.rubber is None:
@@ -777,6 +831,17 @@ class App:
         self.canvas.coords(self.rubber, *self.drag0, e.x, e.y)
 
     def _release(self, e):
+        if self.resize is not None:
+            new = self.resize["new"]
+            self.resize = None
+            if self.rubber is not None:
+                self.canvas.delete(self.rubber); self.rubber = None
+            if new is not None:
+                self._set(self.i, dict(status="visible", box=new, source="drawn"))
+                self.say("Box resized. Space = the next steps copy this box (purple). Click a YOLOX box or press Y to go back.")
+                self.warn_overlap()
+                self.render(); self.draw_timeline(full=True)
+            return
         if self.drag0 is None:
             return
         x0, y0 = self.drag0
@@ -887,6 +952,12 @@ class App:
             t = c.create_text(x1 + 2, ty, text=tag, anchor="sw", fill="white", font=("TkDefaultFont", 11, "bold"))
             bb = c.bbox(t)
             c.tag_lower(c.create_rectangle(bb, fill=col, outline=col), t)
+            if not self.playing:             # resize handles: drag a corner or an edge to change width / height
+                for hx in (x1, (x1 + x2) / 2, x2):
+                    for hy in (y1, (y1 + y2) / 2, y2):
+                        if hx == (x1 + x2) / 2 and hy == (y1 + y2) / 2:
+                            continue
+                        c.create_rectangle(hx - 4, hy - 4, hx + 4, hy + 4, fill="white", outline=col, width=2)
         elif L is not None:
             c.create_text(ox + 12, oy + 12, text=f"{self.name.capitalize()} not visible", anchor="nw", fill="white",
                           font=("TkDefaultFont", 14, "bold"))

@@ -121,11 +121,13 @@ If `initial_labels.csv` has a `label` column, only the rows with the current obj
    - Last label came from **drawing** → the next steps copy your drawn box (purple).
    - The tool **stops by itself** whenever it is unsure (no clear next box, or the box does not match an initial label).
 3. If a box is wrong: Space (pause), go back with ←, click or draw the correct box, Space again. Automatic labels after it are recomputed.
+4. **Resize a box** instead of drawing a new one: while paused, the current box shows small square handles on its corners and edges. Drag a handle to change only the width and/or height (the cursor changes when you are on a handle). The resized box counts as a drawn box, so the next steps copy it (purple); press **Y** to follow the detection boxes again.
 
 | Key | Action |
 |---|---|
 | Click a box | Select a detection box (click again at the same spot = next overlapping box) |
 | Drag | Draw your own box |
+| Drag a handle | Resize the current box (corner = width + height, edge = width or height) |
 | Space | Play / pause (auto-fill) |
 | → / D, ← / A | Next / previous step |
 | Shift + ← → | Jump ~1 second |
