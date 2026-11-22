@@ -24,6 +24,7 @@ Without the launcher window:
 import argparse
 import csv
 import importlib.util
+import json
 import os
 import queue
 import shutil
@@ -116,9 +117,39 @@ class Dataset:
         self.root = Path(folder).resolve()
         self.videos_dir = self.root / "videos" if (self.root / "videos").is_dir() else self.root
         self.npz_dir = self.root / "npz"
-        self.out_dir = self.root / "labels"
+        self.default_out = self.root / "labels"
+        self.settings_file = self.root / "settings.json"   # remembers a custom output folder for this dataset
+        self.out_dir = self._saved_output() or self.default_out
         self.initial_labels = self.root / "initial_labels.csv"
         self.trash_dir = self.root / ".trash"     # deleted npz / label files are moved here
+        self.refresh()
+
+    def _read_settings(self):
+        try:
+            data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _saved_output(self):
+        o = self._read_settings().get("output_dir")
+        return Path(o) if isinstance(o, str) and o else None
+
+    def set_output(self, folder):
+        """Use another output folder for the labels (None = default <dataset>/labels) and remember it."""
+        self.out_dir = Path(folder).resolve() if folder else self.default_out
+        data = self._read_settings()
+        if folder:
+            data["output_dir"] = str(self.out_dir)
+        else:
+            data.pop("output_dir", None)
+        try:
+            if data:
+                self.settings_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            elif self.settings_file.exists():
+                self.settings_file.unlink()
+        except OSError:
+            pass                              # read-only dataset folder: the choice holds for this session only
         self.refresh()
 
     @property
@@ -213,7 +244,7 @@ def check_initial_labels(path):
 
 def labeler_cmd(ds, mode, initial_labels=None, label=DEFAULT_LABEL):
     cmd = [sys.executable, str(TOOLS_DIR / "dense_labeler.py"), "--videos", str(ds.videos_dir), "--out", str(ds.out_dir),
-           "--step", str(ds.step), "--label-name", label]
+           "--step", str(ds.step), "--label-name", label, "--trash", str(ds.trash_dir)]
     if mode != "manual" and ds.npz_dir.is_dir():
         cmd += ["--npz", str(ds.npz_dir)]
     if initial_labels:
@@ -259,6 +290,9 @@ def run_cli(args):
         r = subprocess.run(yolox_cmd(ds, args.model, args.device, args.no_pose, args.redo))
         if r.returncode != 0:
             sys.exit("Creating npz did not finish. Run again to continue.")
+    if args.output_dir:
+        ds.set_output(args.output_dir)
+        print(f"Output folder: {ds.out_dir}")
     init = Path(args.initial_labels) if args.initial_labels else (ds.initial_labels if ds.initial_labels.exists() else None)
     if init is not None:
         err = check_initial_labels(init)
@@ -290,7 +324,7 @@ def run_gui():
         def _build(self):
             r = self.root
             r.title("Dense person labeler · choose dataset")
-            r.geometry("820x860")
+            r.geometry("820x900")
             r.minsize(720, 640)
             r.columnconfigure(0, weight=1)
             r.rowconfigure(3, weight=1)
@@ -329,6 +363,13 @@ def run_gui():
             ttk.Label(f1, text="Name of the object you label, e.g. patient, examiner, dog. Saved in the 'label' column. "
                                "Run again with another name to label another object in the same videos.",
                       wraplength=780, justify="left", foreground="#555").grid(row=7, column=0, sticky="w", pady=(2, 0))
+            orow = ttk.Frame(f1); orow.grid(row=8, column=0, sticky="ew", pady=(8, 0))
+            orow.columnconfigure(1, weight=1)
+            ttk.Label(orow, text="Output folder").grid(row=0, column=0, sticky="w")
+            self.var_out = tk.StringVar(value="")
+            ttk.Entry(orow, textvariable=self.var_out, state="readonly").grid(row=0, column=1, sticky="ew", padx=4)
+            ttk.Button(orow, text="Browse…", command=self.pick_output).grid(row=0, column=2)
+            ttk.Button(orow, text="Default", command=self.default_output).grid(row=0, column=3, padx=(4, 0))
 
             # 2. mode
             f2 = ttk.Frame(r, padding=(12, 8, 12, 4)); f2.grid(row=1, column=0, sticky="nsew")
@@ -444,6 +485,7 @@ def run_gui():
             ds.refresh()
             self.lbl_ds.configure(text=f"{ds.root}\n{ds.summary()}")
             self.lbl_rate.configure(text=ds.rate_text())
+            self.var_out.set(str(ds.out_dir) + ("" if ds.out_dir == ds.default_out else "   (custom)"))
             if ds.initial_labels.exists():
                 self.var_init.set(str(ds.initial_labels)); self.var_use_init.set(True)
             elif self.var_init.get().startswith(str(DATASET_DIR.resolve())):
@@ -471,6 +513,22 @@ def run_gui():
             if d:
                 self.ds = Dataset(d, self.get_step())
                 self.reload()
+
+        def pick_output(self):
+            if self.ds is None:
+                return
+            start = self.ds.out_dir if self.ds.out_dir.is_dir() else self.ds.root
+            d = filedialog.askdirectory(title="Choose where the label CSVs are saved", initialdir=str(start))
+            if d:
+                self.ds.set_output(d)
+                self.write(f"Output folder for {self.ds.name}: {self.ds.out_dir}")
+                self.set_dataset(self.ds)
+
+        def default_output(self):
+            if self.ds is not None and self.ds.out_dir != self.ds.default_out:
+                self.ds.set_output(None)
+                self.write(f"Output folder for {self.ds.name}: back to the default {self.ds.out_dir}")
+                self.set_dataset(self.ds)
 
         def pick_initial_labels(self):
             f = filedialog.askopenfilename(title="Choose an initial-labels CSV", filetypes=[("CSV", "*.csv"), ("All", "*")])
@@ -739,6 +797,7 @@ def main():
     ap.add_argument("--step", type=int, default=2, help="label every N frames (default 2; 1 = every frame)")
     ap.add_argument("--label-name", default=DEFAULT_LABEL,
                     help=f"name of the object being labelled, e.g. patient, examiner, dog (default {DEFAULT_LABEL})")
+    ap.add_argument("--output-dir", help="folder for the label CSVs (default <dataset>/labels); remembered for the dataset")
     args = ap.parse_args()
     if args.dataset:
         run_cli(args)

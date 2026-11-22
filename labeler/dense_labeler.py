@@ -1049,7 +1049,7 @@ class App:
         if d is None:
             return
         self.stop()
-        trash = self.out.parent / ".trash"
+        trash = Path(self.args.trash) if getattr(self.args, "trash", None) else self.out.parent / ".trash"
         others = f"\nLabels of other objects ({', '.join(d.other_labels)}) are kept." if d.other_labels else ""
         if not messagebox.askyesno("Clear labels",
                                    f"Delete all '{self.name}' labels in {d.vid}?{others}\n\n"
@@ -1117,6 +1117,7 @@ def main():
     ap.add_argument("--only", help="only videos whose name contains this text")
     ap.add_argument("--start", help="video to open first")
     ap.add_argument("--merge", action="store_true", help="merge all CSVs in --out into all_labels.csv, then exit")
+    ap.add_argument("--trash", help="folder for backups made by 'Clear all labels' (default: .trash next to --out)")
     ap.add_argument("--label-name", default=DEFAULT_LABEL,
                     help="name of the object being labelled, saved in the 'label' column (e.g. patient, examiner, dog). "
                          f"Default: {DEFAULT_LABEL}. Run again with another name to label another object in the same videos")

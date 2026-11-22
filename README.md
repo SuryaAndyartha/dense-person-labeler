@@ -68,6 +68,7 @@ The launcher window opens:
    - *Manage files…* lists the dataset's videos with their npz and labelled objects, and deletes npz or label files of selected videos (section 7).
 2. **Choose the frame step** (*Label every N frames*, see section 3). Default: 2.
    **Name the object** (*Object label*, see section 4). Default: `target`.
+   **Choose where the labels are saved** (*Output folder*): *Browse…* picks any folder on your computer, *Default* goes back to `datasets/<name>/labels/`. The choice is remembered for that dataset (in `datasets/<name>/settings.json`).
 3. **Choose a labelling mode.** Modes that are not possible are disabled automatically.
 4. **Initial labels (optional).** Filled in automatically if `datasets/<name>/initial_labels.csv` exists.
 5. Click **Start**. The labeller opens; when you close it, you return to the launcher.
@@ -121,13 +122,14 @@ If `initial_labels.csv` has a `label` column, only the rows with the current obj
    - Last label came from **drawing** → the next steps copy your drawn box (purple).
    - The tool **stops by itself** whenever it is unsure (no clear next box, or the box does not match an initial label).
 3. If a box is wrong: Space (pause), go back with ←, click or draw the correct box, Space again. Automatic labels after it are recomputed.
-4. **Resize a box** instead of drawing a new one: while paused, the current box shows small square handles on its corners and edges. Drag a handle to change only the width and/or height (the cursor changes when you are on a handle). The resized box counts as a drawn box, so the next steps copy it (purple); press **Y** to follow the detection boxes again.
+4. **Resize a box** instead of drawing a new one: while paused, the current box shows small square handles on its corners and edges. Drag a handle to change only the width and/or height (the cursor changes when you are on a handle). To **move** the whole box without changing its size, hold **Shift** and drag inside the box (the cursor shows a four-way arrow). A resized or moved box counts as a drawn box, so the next steps copy it (purple); press **Y** to follow the detection boxes again.
 
 | Key | Action |
 |---|---|
 | Click a box | Select a detection box (click again at the same spot = next overlapping box) |
 | Drag | Draw your own box |
 | Drag a handle | Resize the current box (corner = width + height, edge = width or height) |
+| Shift + drag inside the box | Move the current box (size unchanged) |
 | Space | Play / pause (auto-fill) |
 | → / D, ← / A | Next / previous step |
 | Shift + ← → | Jump ~1 second |
@@ -187,7 +189,7 @@ In the worst case the run is as fast as `cpu`, never a failure.
 
 ## 7. Deleting labels and npz
 
-Nothing is deleted permanently: files are moved (or, for a cleared label, the CSV is first copied) to the dataset's trash folder `datasets/<name>/.trash/`, with a timestamp in the name. To restore a file, move it back and remove the timestamp from its name.
+Nothing is deleted permanently: files are moved (or, for a cleared label, the CSV is first copied) to the dataset's trash folder `datasets/<name>/.trash/`, with a timestamp in the name. To restore a file, move it back and remove the timestamp from its name. The trash stays in the dataset folder even if the labels are saved in another output folder.
 
 - **In the labeller:** *Clear all '<label>' labels in this video…* removes every label of the current object in the open video. Labels of other objects in the same CSV are kept; a backup of the CSV is copied to the trash first.
 - **In the launcher:** *Manage files…* → select videos → *Delete npz* or *Delete labels*. *Delete labels* moves the whole CSV of those videos (all objects).
@@ -218,11 +220,12 @@ datasets/<dataset_name>/
 ├── videos/              REQUIRED, you fill it: videos (.mp4/.avi/.mov/.mkv)
 ├── npz/                 created by "Create npz", or copied by you (same name as the video)
 ├── initial_labels.csv   OPTIONAL: initial labels (video_id, frame_idx, x1, y1, x2, y2)
-├── labels/              created automatically: results, one CSV per video
+├── labels/              created automatically: results, one CSV per video (unless another output folder is chosen)
+├── settings.json        created only if you choose another output folder
 └── .trash/              created when something is deleted: deleted / backed-up files
 ```
 
-Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1,x2,y2,source,label`, grouped by label, then frame (so `frame_idx` restarts for each label). For analysis, filter by `label` or sort by `label, frame_idx`.
+Output: `labels/<video>.csv` (or `<output folder>/<video>.csv` if you chose another output folder) with columns `video_id,frame_idx,t_sec,status,x1,y1,x2,y2,source,label`, grouped by label, then frame (so `frame_idx` restarts for each label). For analysis, filter by `label` or sort by `label, frame_idx`.
 - `status`: `visible` or `absent`.
 - `source`: `click` (clicked detection box), `drawn` (drawn box), `auto` (following detection boxes), `follow_drawn` (copy of your drawn box), `initial` (initial label).
 - `label`: the object label (section 4).
@@ -230,7 +233,7 @@ Output: `labels/<video>.csv` with columns `video_id,frame_idx,t_sec,status,x1,y1
 ## 9. Without the launcher window
 
 ```bash
-python start.py --dataset datasets/example_dataset --mode npz      [--step 2] [--label-name patient]
+python start.py --dataset datasets/example_dataset --mode npz      [--step 2] [--label-name patient] [--output-dir ~/my_labels]
 python start.py --dataset datasets/example_dataset --mode manual   [--step 2]
 python start.py --dataset datasets/example_dataset --mode yolox    [--step 2] [--no-pose] [--redo] [--device auto|cpu|mps|cuda]
 
@@ -282,5 +285,6 @@ Frames are read sequentially (`grab/retrieve`), so frame numbers match the label
 5. **Object labels:** label a video as `patient`, then again as `examiner`. Expected: one CSV with both labels; in the second session the `patient` boxes appear as thin dashed boxes. Following the `patient` box as `examiner` pauses once with an overlap warning; continuing on it does not warn again.
 6. **Frame step:** with an npz made at N = 2, choose N = 4 (npz still used) and N = 1 or 3 (labelled manually, or recreated by *Create npz*).
 7. **Recreate npz:** with all videos having a matching npz, tick *Recreate existing npz too*. Expected: the YOLOX mode becomes available, a confirmation lists the npz to overwrite, then all are recreated.
-8. **Delete:** *Manage files…* → delete the npz of one video (it then counts as "without npz") and the labels of another; *Clear all … labels* in the labeller. Expected: files appear in `.trash/`, other objects' labels are kept.
-9. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.
+8. **Output folder:** choose another folder with *Browse…*, label a few steps, close and reopen the launcher. Expected: the CSV is written there, the folder is still selected, and *Manage files…* lists its labels.
+9. **Delete:** *Manage files…* → delete the npz of one video (it then counts as "without npz") and the labels of another; *Clear all … labels* in the labeller. Expected: files appear in `.trash/`, other objects' labels are kept.
+10. **Fresh user:** new `.venv` + temporarily move `~/.cache/rtmlib`, then follow sections 1–2 from scratch.
