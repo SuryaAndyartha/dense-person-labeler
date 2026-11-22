@@ -80,7 +80,8 @@ OVERLAP_IOU = 0.5
 HANDLE_PX = 7
 HANDLE_CURSORS = {"nw": "top_left_corner", "ne": "top_right_corner", "sw": "bottom_left_corner",
                   "se": "bottom_right_corner", "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
-                  "w": "sb_h_double_arrow", "e": "sb_h_double_arrow"}
+                  "w": "sb_h_double_arrow", "e": "sb_h_double_arrow", "move": "fleur"}
+SHIFT_MASK = 0x0001   # Tk event state bit for the Shift key
 ALERT_COLOR = "#ff6a00"   # banner and highlighted box of an overlap warning
 OVERLAP_GAP_SEC = 1.0          # a keypoint is shown if its score >= this
 
@@ -415,7 +416,7 @@ class App:
                         command=self._toggle_others_from_box).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         ttk.Label(p, text="Keys", style="Head.TLabel").grid(row=12, column=0, sticky="w")
-        keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"), ("Drag a handle", "resize the current box"),
+        keys = [("Click box", "select a YOLOX box (click again = another box)"), ("Drag", "draw your own box"), ("Drag a handle", "resize the current box"), ("Shift + drag box", "move the current box"),
                 ("Space", "play / pause (auto-fill)"), ("→  /  D", "next step"), ("←  /  A", "previous step"),
                 ("Shift + ← →", "jump ~1 second"), ("F", "lock this box: next steps copy it"),
                 ("Y", "follow YOLOX again from this step"), ("N", f"{self.name} not visible"),
@@ -786,8 +787,20 @@ class App:
         h = "w" if abs(x - x1) <= t else ("e" if abs(x - x2) <= t else "")
         return (v + h) or None
 
+    def _inside_box(self, x, y):
+        """True if screen point (x, y) is inside the current step's visible box."""
+        d = self.data
+        L = d.labels.get(self.i) if d is not None else None
+        if L is None or L["status"] != "visible" or L["box"] is None:
+            return False
+        px, py = self._to_img(x, y)
+        b = L["box"]
+        return b[0] <= px <= b[2] and b[1] <= py <= b[3]
+
     def _hover(self, e):
         h = None if (self.playing or self.drag0 is not None or self.resize is not None) else self._handle_at(e.x, e.y)
+        if h is None and not self.playing and self.resize is None and e.state & SHIFT_MASK and self._inside_box(e.x, e.y):
+            h = "move"
         cur = HANDLE_CURSORS.get(h, "")
         if self.canvas.cget("cursor") != cur:
             self.canvas.configure(cursor=cur)
@@ -800,6 +813,11 @@ class App:
             self.resize = dict(h=h, new=None)
             self.drag0 = None
             return
+        if e.state & SHIFT_MASK and self._inside_box(e.x, e.y):   # Shift + drag inside the box: move it
+            self.resize = dict(h="move", new=None, start=self._to_img(e.x, e.y),
+                               orig=self.data.labels[self.i]["box"].copy())
+            self.drag0 = None
+            return
         self.drag0 = (e.x, e.y)
 
     def _drag(self, e):
@@ -809,14 +827,20 @@ class App:
             px, py = self._to_img(e.x, e.y)
             px, py = min(max(px, 0), d.W), min(max(py, 0), d.H)
             h = self.resize["h"]
-            if "w" in h:
-                b[0] = min(px, b[2] - 4)
-            if "e" in h:
-                b[2] = max(px, b[0] + 4)
-            if "n" in h:
-                b[1] = min(py, b[3] - 4)
-            if "s" in h:
-                b[3] = max(py, b[1] + 4)
+            if h == "move":                  # shift the whole box, keeping its size, inside the image
+                o = self.resize["orig"]
+                dx = min(max(px - self.resize["start"][0], -o[0]), d.W - o[2])
+                dy = min(max(py - self.resize["start"][1], -o[1]), d.H - o[3])
+                b = o + np.array([dx, dy, dx, dy])
+            else:                            # resize: move only the grabbed edges
+                if "w" in h:
+                    b[0] = min(px, b[2] - 4)
+                if "e" in h:
+                    b[2] = max(px, b[0] + 4)
+                if "n" in h:
+                    b[1] = min(py, b[3] - 4)
+                if "s" in h:
+                    b[3] = max(py, b[1] + 4)
             self.resize["new"] = b
             s, ox, oy = self.view
             xy = (ox + b[0] * s, oy + b[1] * s, ox + b[2] * s, oy + b[3] * s)
@@ -832,13 +856,14 @@ class App:
 
     def _release(self, e):
         if self.resize is not None:
-            new = self.resize["new"]
+            new, moved = self.resize["new"], self.resize["h"] == "move"
             self.resize = None
             if self.rubber is not None:
                 self.canvas.delete(self.rubber); self.rubber = None
             if new is not None:
                 self._set(self.i, dict(status="visible", box=new, source="drawn"))
-                self.say("Box resized. Space = the next steps copy this box (purple). Click a YOLOX box or press Y to go back.")
+                self.say(f"Box {'moved' if moved else 'resized'}. Space = the next steps copy this box (purple). "
+                         "Click a YOLOX box or press Y to go back.")
                 self.warn_overlap()
                 self.render(); self.draw_timeline(full=True)
             return
